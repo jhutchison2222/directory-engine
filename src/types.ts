@@ -1,0 +1,8 @@
+export interface Env {
+  DIRECTORY_DB: D1Database;
+  DIRECTORY_ENGINE_API_KEY: string;
+  WORDPRESS_BASE_URL: string;
+  WORDPRESS_USERNAME?: string;
+  WORDPRESS_APPLICATION_PASSWORD?: string;
+  ALLOWED_ORIGINS?: string;
+}
