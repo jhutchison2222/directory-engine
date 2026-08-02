@@ -70,14 +70,15 @@ update, delete, publish, migration, SQL execution, or other mutation tools.
 
 ## Configuration
 
-Copy `wrangler.example.toml` to the ignored `wrangler.toml` and supply the
-existing D1 database ID. The deployed binding and configuration names are:
+The tracked `wrangler.toml` contains the active non-secret deployment
+configuration. `wrangler.example.toml` remains a placeholder template. The
+deployed binding and configuration names are:
 
 - D1 binding: `DIRECTORY_DB`
 - Variable: `WORDPRESS_BASE_URL`
 - Variable: `ALLOWED_ORIGINS` (comma-separated exact origins)
 - Secret: `DIRECTORY_ENGINE_API_KEY`
-- Optional secrets: `WORDPRESS_USERNAME`, `WORDPRESS_APPLICATION_PASSWORD`
+- Optional secrets: `GEODIRECTORY_CONSUMER_KEY`, `GEODIRECTORY_CONSUMER_SECRET`
 
 No secret values belong in Git. See [the deployment guide](docs/deployment.md)
 for safe configuration, validation, and smoke-test commands.
@@ -86,7 +87,6 @@ for safe configuration, validation, and smoke-test commands.
 
 ```sh
 npm install
-cp wrangler.example.toml wrangler.toml
 npm test
 npm run typecheck
 npm run dev

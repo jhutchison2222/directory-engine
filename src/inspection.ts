@@ -12,10 +12,10 @@ export const ROUTES = {
 
 function wordpressHeaders(env: Env): Headers {
   const headers = new Headers({ accept: "application/json" });
-  if (env.WORDPRESS_USERNAME && env.WORDPRESS_APPLICATION_PASSWORD) {
+  if (env.GEODIRECTORY_CONSUMER_KEY && env.GEODIRECTORY_CONSUMER_SECRET) {
     headers.set(
       "authorization",
-      `Basic ${btoa(`${env.WORDPRESS_USERNAME}:${env.WORDPRESS_APPLICATION_PASSWORD}`)}`,
+      `Basic ${btoa(`${env.GEODIRECTORY_CONSUMER_KEY}:${env.GEODIRECTORY_CONSUMER_SECRET}`)}`,
     );
   }
   return headers;

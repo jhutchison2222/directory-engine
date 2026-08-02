@@ -88,8 +88,8 @@ async function wordpressGet(env, path, query = new URLSearchParams()) {
   const url = new URL(path, wordpressBase(env));
   url.search = query.toString();
   const headers = new Headers({ accept: "application/json" });
-  if (env.WORDPRESS_USERNAME && env.WORDPRESS_APPLICATION_PASSWORD) {
-    headers.set("authorization", `Basic ${btoa(`${env.WORDPRESS_USERNAME}:${env.WORDPRESS_APPLICATION_PASSWORD}`)}`);
+  if (env.GEODIRECTORY_CONSUMER_KEY && env.GEODIRECTORY_CONSUMER_SECRET) {
+    headers.set("authorization", `Basic ${btoa(`${env.GEODIRECTORY_CONSUMER_KEY}:${env.GEODIRECTORY_CONSUMER_SECRET}`)}`);
   }
   let response;
   for (let attempt = 1; attempt <= MAX_UPSTREAM_ATTEMPTS; attempt += 1) {
