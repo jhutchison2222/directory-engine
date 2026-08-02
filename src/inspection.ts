@@ -141,9 +141,9 @@ export function wordpressCollectionPath(resource: string): string {
 
 export function geoPath(resource: string): string {
   const paths: Record<string, string> = {
-    "listing-types": "wp-json/geodir/v2/post_types",
+    "listing-types": "wp-json/geodir/v2/types",
     taxonomies: "wp-json/geodir/v2/taxonomies",
-    fields: "wp-json/geodir/v2/custom-fields",
+    fields: "wp-json/geodir/v2/fields",
     settings: "wp-json/geodir/v2/settings",
     locations: "wp-json/geodir/v2/locations",
     cities: "wp-json/geodir/v2/locations/cities",

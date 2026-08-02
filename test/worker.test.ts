@@ -88,7 +88,7 @@ describe("deployed v0.2.0 contract", () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe("https://wordpress.test/wp-json/wp/v2/pages?per_page=10");
     await route(request("/v1/geodirectory/fields?post_type=gd_place"), environment());
     expect(String(fetchMock.mock.calls[1][0])).toBe(
-      "https://wordpress.test/wp-json/geodir/v2/custom-fields?post_type=gd_place",
+      "https://wordpress.test/wp-json/geodir/v2/fields?post_type=gd_place",
     );
     const write = await route(request("/v1/wordpress/posts", { method: "POST" }), environment());
     expect(write.status).toBe(405);
@@ -102,9 +102,9 @@ describe("deployed v0.2.0 contract", () => {
     ["/v1/wordpress/posts/7", "/wp-json/wp/v2/posts/7"],
     ["/v1/wordpress/categories", "/wp-json/wp/v2/categories"],
     ["/v1/wordpress/categories/7", "/wp-json/wp/v2/categories/7"],
-    ["/v1/geodirectory/listing-types", "/wp-json/geodir/v2/post_types"],
+    ["/v1/geodirectory/listing-types", "/wp-json/geodir/v2/types"],
     ["/v1/geodirectory/taxonomies", "/wp-json/geodir/v2/taxonomies"],
-    ["/v1/geodirectory/fields", "/wp-json/geodir/v2/custom-fields"],
+    ["/v1/geodirectory/fields", "/wp-json/geodir/v2/fields"],
     ["/v1/geodirectory/settings", "/wp-json/geodir/v2/settings"],
     ["/v1/geodirectory/locations", "/wp-json/geodir/v2/locations"],
     ["/v1/geodirectory/cities", "/wp-json/geodir/v2/locations/cities"],

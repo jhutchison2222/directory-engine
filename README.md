@@ -6,6 +6,10 @@ preserves that REST contract and adds a stateless, read-only MCP endpoint at
 `/mcp`.
 
 The live Worker name remains `directory-engine-api`.
+The deployed v0.2.0 JavaScript baseline is preserved for review at
+[`reference/directory-engine-api-worker.js`](reference/directory-engine-api-worker.js),
+with a route-by-route comparison in
+[`docs/baseline-comparison.md`](docs/baseline-comparison.md).
 
 It is **not** a public directory-search service. It does not create, migrate, or
 replace the deployed 21-table D1 database, and it exposes no write operations.
