@@ -124,6 +124,24 @@ describe("deployed v0.2.0 contract", () => {
     });
   });
 
+  it("returns only connection booleans when connection checks fail", async () => {
+    const failedDatabase = environment();
+    failedDatabase.DIRECTORY_DB = {
+      prepare: () => ({
+        first: async () => { throw new Error("database detail must not escape"); },
+      }) as unknown as D1PreparedStatement,
+    } as D1Database;
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("wordpress detail must not escape"))
+      .mockResolvedValueOnce(Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await payload(await route(request("/v1/connection-test"), failedDatabase))).toEqual({
+      database: { connected: false },
+      wordpress: { connected: false },
+      geodirectory: { connected: true },
+    });
+  });
+
   it("applies CORS only to configured origins", async () => {
     const allowed = await route(request("/v1/capabilities", { headers: { origin: "https://console.test" } }), environment());
     expect(allowed.headers.get("access-control-allow-origin")).toBe("https://console.test");
@@ -168,17 +186,35 @@ describe("deployed v0.2.0 contract", () => {
 
   it("rejects redirects, retries transient failures, and limits upstream bodies", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 302, headers: { location: "https://other.test" } })));
-    expect((await route(request("/v1/wordpress/pages"), environment())).status).toBe(502);
+    let response = await route(request("/v1/wordpress/pages"), environment());
+    expect(response.status).toBe(500);
+    expect(await payload(response)).toEqual({ error: "Inspection request failed" });
 
     const retry = vi.fn(async () => new Response("unavailable", { status: 503 }));
     vi.stubGlobal("fetch", retry);
-    expect((await route(request("/v1/wordpress/pages"), environment())).status).toBe(502);
+    response = await route(request("/v1/wordpress/pages"), environment());
+    expect(response.status).toBe(500);
+    expect(await payload(response)).toEqual({ error: "Inspection request failed" });
     expect(retry).toHaveBeenCalledTimes(3);
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response("too large", {
       headers: { "content-length": "1048577" },
     })));
-    expect((await route(request("/v1/wordpress/pages"), environment())).status).toBe(502);
+    response = await route(request("/v1/wordpress/pages"), environment());
+    expect(response.status).toBe(500);
+    expect(await payload(response)).toEqual({ error: "Inspection request failed" });
+  });
+
+  it("uses the baseline HTTP 500 contract for WordPress and GeoDirectory failures", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(
+      { code: "upstream_failure", message: "internal upstream detail" },
+      { status: 403 },
+    )));
+    for (const path of ["/v1/wordpress/posts", "/v1/geodirectory/fields"]) {
+      const response = await route(request(path), environment());
+      expect(response.status).toBe(500);
+      expect(await payload(response)).toEqual({ error: "Inspection request failed" });
+    }
   });
 });
 

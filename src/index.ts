@@ -5,7 +5,6 @@ import {
   ROUTES,
   safeError,
   testConnections,
-  UpstreamError,
   VERSION,
   wordpressCollectionPath,
   wordpressGet,
@@ -91,8 +90,8 @@ export async function route(request: Request, env: Env): Promise<Response> {
     return jsonResponse(
       request,
       env,
-      { error: error instanceof UpstreamError ? "Upstream request failed" : "Inspection request failed" },
-      { status: error instanceof UpstreamError ? 502 : 500 },
+      { error: "Inspection request failed" },
+      { status: 500 },
     );
   }
 }

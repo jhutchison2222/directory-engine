@@ -121,7 +121,6 @@ export async function testConnections(env: Env) {
   ]);
   const state = (result: PromiseSettledResult<unknown>) => ({
     connected: result.status === "fulfilled",
-    ...(result.status === "rejected" ? { error: safeError(result.reason) } : {}),
   });
   return {
     database: state(database),
