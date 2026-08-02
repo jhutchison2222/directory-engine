@@ -7,6 +7,8 @@ function environment(): Env {
   return {
     DIRECTORY_ENGINE_API_KEY: "test-only-key",
     WORDPRESS_BASE_URL: "https://wordpress.test",
+    GEODIRECTORY_CONSUMER_KEY: "consumer-key",
+    GEODIRECTORY_CONSUMER_SECRET: "consumer-secret",
     ALLOWED_ORIGINS: "https://console.test",
     DIRECTORY_DB: {
       prepare(sql: string) {
@@ -86,6 +88,9 @@ describe("deployed v0.2.0 contract", () => {
     const pages = await route(request("/v1/wordpress/pages?per_page=10&unsafe=discarded"), environment());
     expect(pages.status).toBe(200);
     expect(String(fetchMock.mock.calls[0][0])).toBe("https://wordpress.test/wp-json/wp/v2/pages?per_page=10");
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("authorization")).toBe(
+      `Basic ${btoa("consumer-key:consumer-secret")}`,
+    );
     await route(request("/v1/geodirectory/fields?post_type=gd_place"), environment());
     expect(String(fetchMock.mock.calls[1][0])).toBe(
       "https://wordpress.test/wp-json/geodir/v2/fields?post_type=gd_place",

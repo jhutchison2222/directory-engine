@@ -13,22 +13,20 @@ The Wrangler service name remains `directory-engine-api`.
 | Variable | `WORDPRESS_BASE_URL` | WordPress site origin |
 | Variable | `ALLOWED_ORIGINS` | Comma-separated browser origins allowed by CORS |
 | Secret | `DIRECTORY_ENGINE_API_KEY` | Authorizes `/v1/*` and `/mcp` |
-| Optional secret | `WORDPRESS_USERNAME` | WordPress REST Basic Auth user |
-| Optional secret | `WORDPRESS_APPLICATION_PASSWORD` | WordPress application password |
+| Optional secret | `GEODIRECTORY_CONSUMER_KEY` | GeoDirectory REST consumer key |
+| Optional secret | `GEODIRECTORY_CONSUMER_SECRET` | GeoDirectory REST consumer secret |
 
-The example configuration contains placeholders only. Do not commit a copied
-`wrangler.toml`, `.dev.vars`, API key, WordPress credential, account ID, or real
-database ID.
+The example configuration contains placeholders only. The active `wrangler.toml`
+commits the Worker and D1 identifiers, but no secret values. Do not commit
+`.dev.vars`, API keys, or GeoDirectory credentials.
 
 ## Configure without exposing secrets
 
 ```sh
-cp wrangler.example.toml wrangler.toml
-# Set the existing DIRECTORY_DB database_id in the ignored wrangler.toml.
 npx wrangler secret put DIRECTORY_ENGINE_API_KEY
-# Only if the deployed WordPress REST API requires them:
-npx wrangler secret put WORDPRESS_USERNAME
-npx wrangler secret put WORDPRESS_APPLICATION_PASSWORD
+# Only if the deployed GeoDirectory REST API requires them:
+npx wrangler secret put GEODIRECTORY_CONSUMER_KEY
+npx wrangler secret put GEODIRECTORY_CONSUMER_SECRET
 ```
 
 Use CI secret storage instead of interactive commands in automated deployments.
