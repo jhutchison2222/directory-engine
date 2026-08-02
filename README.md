@@ -70,8 +70,10 @@ update, delete, publish, migration, SQL execution, or other mutation tools.
 
 ## Configuration
 
-Copy `wrangler.example.toml` to the ignored `wrangler.toml` and supply the
-existing D1 database ID. The deployed binding and configuration names are:
+The reviewed, active `wrangler.toml` is committed for GitHub deployment. Use
+`wrangler.example.toml` only as a separate local configuration template; do not
+overwrite the active deployment file. The deployed binding and configuration
+names are:
 
 - D1 binding: `DIRECTORY_DB`
 - Variable: `WORDPRESS_BASE_URL`
@@ -86,8 +88,7 @@ for safe configuration, validation, and smoke-test commands.
 
 ```sh
 npm install
-cp wrangler.example.toml wrangler.toml
 npm test
 npm run typecheck
-npm run dev
+npx wrangler dev --config wrangler.example.toml
 ```

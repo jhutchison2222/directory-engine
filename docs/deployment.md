@@ -16,9 +16,10 @@ The Wrangler service name remains `directory-engine-api`.
 | Secret | `GEODIRECTORY_CONSUMER_KEY` | GeoDirectory REST consumer key |
 | Secret | `GEODIRECTORY_CONSUMER_SECRET` | GeoDirectory REST consumer secret |
 
-The example configuration contains placeholders only. Do not commit a copied
-`wrangler.toml`, `.dev.vars`, API key, WordPress credential, account ID, or real
-database ID.
+The reviewed production `wrangler.toml` is the committed GitHub deployment
+configuration. `wrangler.example.toml` contains placeholders for separate local
+use. Never commit `.dev.vars`, API keys, consumer credentials, tokens, or other
+secret-bearing local files.
 
 The active `wrangler.toml` intentionally omits `ALLOWED_ORIGINS`, so browser
 origins receive no CORS grant. The deployed API remains server-to-server only.
@@ -26,8 +27,6 @@ origins receive no CORS grant. The deployed API remains server-to-server only.
 ## Configure without exposing secrets
 
 ```sh
-cp wrangler.example.toml wrangler.toml
-# Set the existing DIRECTORY_DB database_id in the ignored wrangler.toml.
 npx wrangler secret put DIRECTORY_ENGINE_API_KEY
 npx wrangler secret put GEODIRECTORY_CONSUMER_KEY
 npx wrangler secret put GEODIRECTORY_CONSUMER_SECRET
