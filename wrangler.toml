@@ -1,0 +1,17 @@
+name = "directory-engine-api"
+main = "src/index.ts"
+compatibility_date = "2025-07-05"
+workers_dev = true
+
+[vars]
+WORDPRESS_BASE_URL = "https://master.directory-engine.net"
+
+[[d1_databases]]
+binding = "DIRECTORY_DB"
+database_name = "directory-engine-prod"
+database_id = "c473821b-9273-4cf0-b02d-0c3a967f06eb"
+
+# Existing secret names (values are configured in Cloudflare, never in Git):
+# DIRECTORY_ENGINE_API_KEY
+# GEODIRECTORY_CONSUMER_KEY
+# GEODIRECTORY_CONSUMER_SECRET

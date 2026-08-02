@@ -1,0 +1,8 @@
+export interface Env {
+  DIRECTORY_DB: D1Database;
+  DIRECTORY_ENGINE_API_KEY: string;
+  WORDPRESS_BASE_URL: string;
+  GEODIRECTORY_CONSUMER_KEY?: string;
+  GEODIRECTORY_CONSUMER_SECRET?: string;
+  ALLOWED_ORIGINS?: string;
+}
