@@ -1,4 +1,4 @@
-name = "directory-engine"
+name = "directory-engine-api"
 main = "src/index.ts"
 compatibility_date = "2025-07-05"
 workers_dev = true
@@ -13,6 +13,6 @@ database_name = "directory-engine"
 database_id = "00000000-0000-0000-0000-000000000000"
 
 # Existing secret names (set with `wrangler secret put`; never add values here):
-# API_KEY
+# DIRECTORY_ENGINE_API_KEY
 # WORDPRESS_USERNAME
 # WORDPRESS_APPLICATION_PASSWORD

@@ -5,7 +5,7 @@ import type { Env } from "../src/types";
 
 function environment(): Env {
   return {
-    API_KEY: "test-only-key",
+    DIRECTORY_ENGINE_API_KEY: "test-only-key",
     WORDPRESS_BASE_URL: "https://wordpress.test",
     ALLOWED_ORIGINS: "https://console.test",
     DIRECTORY_DB: {
@@ -28,7 +28,7 @@ function environment(): Env {
 
 function request(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
-  headers.set("x-api-key", "test-only-key");
+  headers.set("x-directory-engine-key", "test-only-key");
   return new Request(`https://worker.test${path}`, { ...init, headers });
 }
 
@@ -45,6 +45,21 @@ describe("deployed v0.2.0 contract", () => {
     const denied = await route(new Request("https://worker.test/v1/capabilities"), environment());
     expect(denied.status).toBe(401);
     expect(await payload(denied)).toEqual({ error: "Unauthorized" });
+  });
+
+  it("accepts both authoritative authentication headers and rejects incorrect keys", async () => {
+    const bearer = await route(new Request("https://worker.test/v1/capabilities", {
+      headers: { authorization: "Bearer test-only-key" },
+    }), environment());
+    expect(bearer.status).toBe(200);
+    const named = await route(new Request("https://worker.test/v1/capabilities", {
+      headers: { "X-Directory-Engine-Key": "test-only-key" },
+    }), environment());
+    expect(named.status).toBe(200);
+    const wrong = await route(new Request("https://worker.test/v1/capabilities", {
+      headers: { "X-Directory-Engine-Key": "incorrect-key" },
+    }), environment());
+    expect(wrong.status).toBe(401);
   });
 
   it("advertises the preserved routes, binding, and MCP tools", async () => {
@@ -80,11 +95,90 @@ describe("deployed v0.2.0 contract", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ["/v1/wordpress/pages", "/wp-json/wp/v2/pages"],
+    ["/v1/wordpress/pages/7", "/wp-json/wp/v2/pages/7"],
+    ["/v1/wordpress/posts", "/wp-json/wp/v2/posts"],
+    ["/v1/wordpress/posts/7", "/wp-json/wp/v2/posts/7"],
+    ["/v1/wordpress/categories", "/wp-json/wp/v2/categories"],
+    ["/v1/wordpress/categories/7", "/wp-json/wp/v2/categories/7"],
+    ["/v1/geodirectory/listing-types", "/wp-json/geodir/v2/post_types"],
+    ["/v1/geodirectory/taxonomies", "/wp-json/geodir/v2/taxonomies"],
+    ["/v1/geodirectory/fields", "/wp-json/geodir/v2/custom-fields"],
+    ["/v1/geodirectory/settings", "/wp-json/geodir/v2/settings"],
+    ["/v1/geodirectory/locations", "/wp-json/geodir/v2/locations"],
+    ["/v1/geodirectory/cities", "/wp-json/geodir/v2/locations/cities"],
+  ])("preserves GET %s", async (workerPath: string, upstreamPath: string) => {
+    const fetchMock = vi.fn(async () => Response.json([]));
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await route(request(workerPath), environment())).status).toBe(200);
+    expect(new URL(String(fetchMock.mock.calls[0][0])).pathname).toBe(upstreamPath);
+  });
+
+  it("preserves the connection-test response contract", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ok: true })));
+    expect(await payload(await route(request("/v1/connection-test"), environment()))).toEqual({
+      database: { connected: true },
+      wordpress: { connected: true },
+      geodirectory: { connected: true },
+    });
+  });
+
   it("applies CORS only to configured origins", async () => {
     const allowed = await route(request("/v1/capabilities", { headers: { origin: "https://console.test" } }), environment());
     expect(allowed.headers.get("access-control-allow-origin")).toBe("https://console.test");
     const denied = await route(request("/v1/capabilities", { headers: { origin: "https://other.test" } }), environment());
     expect(denied.headers.get("access-control-allow-origin")).toBeNull();
+    const wildcardEnv = { ...environment(), ALLOWED_ORIGINS: "*" };
+    const wildcard = await route(request("/v1/capabilities", { headers: { origin: "https://other.test" } }), wildcardEnv);
+    expect(wildcard.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("answers preflight without credentials using only the preserved headers", async () => {
+    const response = await route(new Request("https://worker.test/v1/database/status", {
+      method: "OPTIONS",
+      headers: { origin: "https://console.test" },
+    }), environment());
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-methods")).toBe("GET, OPTIONS");
+    expect(response.headers.get("access-control-allow-headers")).toBe(
+      "authorization, content-type, x-directory-engine-key, x-request-id",
+    );
+    const mcp = await route(new Request("https://worker.test/mcp", {
+      method: "OPTIONS", headers: { origin: "https://console.test" },
+    }), environment());
+    expect(mcp.headers.get("access-control-allow-methods")).toBe("POST, OPTIONS");
+  });
+
+  it("returns or preserves request IDs on every response", async () => {
+    const generated = await route(request("/v1/capabilities"), environment());
+    expect(generated.headers.get("x-request-id")).toMatch(/^[0-9a-f-]{36}$/);
+    const supplied = await route(request("/v1/capabilities", { headers: { "x-request-id": "caller-id" } }), environment());
+    expect(supplied.headers.get("x-request-id")).toBe("caller-id");
+  });
+
+  it("requires HTTPS for WordPress and strips out-of-range upstream pagination", async () => {
+    const insecure = { ...environment(), WORDPRESS_BASE_URL: "http://wordpress.test" };
+    expect((await route(request("/v1/wordpress/pages"), insecure)).status).toBe(500);
+    const fetchMock = vi.fn(async () => Response.json([]));
+    vi.stubGlobal("fetch", fetchMock);
+    await route(request("/v1/wordpress/pages?per_page=101&page=2"), environment());
+    expect(String(fetchMock.mock.calls[0][0])).toBe("https://wordpress.test/wp-json/wp/v2/pages?page=2");
+  });
+
+  it("rejects redirects, retries transient failures, and limits upstream bodies", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 302, headers: { location: "https://other.test" } })));
+    expect((await route(request("/v1/wordpress/pages"), environment())).status).toBe(502);
+
+    const retry = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", retry);
+    expect((await route(request("/v1/wordpress/pages"), environment())).status).toBe(502);
+    expect(retry).toHaveBeenCalledTimes(3);
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("too large", {
+      headers: { "content-length": "1048577" },
+    })));
+    expect((await route(request("/v1/wordpress/pages"), environment())).status).toBe(502);
   });
 });
 
@@ -104,7 +198,7 @@ describe("read-only MCP upgrade", () => {
 
   it("initializes as the same v0.2.0 Worker", async () => {
     expect(await payload(await call("initialize"))).toMatchObject({
-      result: { protocolVersion: "2025-06-18", serverInfo: { name: "directory-engine", version: "0.2.0" } },
+      result: { protocolVersion: "2025-06-18", serverInfo: { name: "directory-engine-api", version: "0.2.0" } },
     });
   });
 

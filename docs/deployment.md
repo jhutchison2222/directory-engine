@@ -3,6 +3,7 @@
 This deployment preserves the existing read-only Directory Engine Worker. It
 must be bound to the already deployed D1 database; do not create a replacement
 database and do not apply a new schema or migration.
+The Wrangler service name remains `directory-engine-api`.
 
 ## Required configuration contract
 
@@ -11,7 +12,7 @@ database and do not apply a new schema or migration.
 | D1 binding | `DIRECTORY_DB` | Existing 21-table directory database |
 | Variable | `WORDPRESS_BASE_URL` | WordPress site origin |
 | Variable | `ALLOWED_ORIGINS` | Comma-separated browser origins allowed by CORS |
-| Secret | `API_KEY` | Authorizes `/v1/*` and `/mcp` |
+| Secret | `DIRECTORY_ENGINE_API_KEY` | Authorizes `/v1/*` and `/mcp` |
 | Optional secret | `WORDPRESS_USERNAME` | WordPress REST Basic Auth user |
 | Optional secret | `WORDPRESS_APPLICATION_PASSWORD` | WordPress application password |
 
@@ -24,7 +25,7 @@ database ID.
 ```sh
 cp wrangler.example.toml wrangler.toml
 # Set the existing DIRECTORY_DB database_id in the ignored wrangler.toml.
-npx wrangler secret put API_KEY
+npx wrangler secret put DIRECTORY_ENGINE_API_KEY
 # Only if the deployed WordPress REST API requires them:
 npx wrangler secret put WORDPRESS_USERNAME
 npx wrangler secret put WORDPRESS_APPLICATION_PASSWORD
@@ -54,6 +55,10 @@ npm run deploy
 The REST API rejects mutation methods and the MCP registry contains only
 inspection tools. Cloudflare and WordPress credentials are never returned in
 responses or connection-test errors.
+
+The upstream client accepts HTTPS only, does not follow redirects, limits
+responses to 1 MiB, and makes at most three attempts for HTTP 429 and 5xx
+responses. Do not weaken these controls during deployment.
 
 ## Smoke test
 
@@ -98,7 +103,9 @@ curl --fail-with-body \
 Only exact origins in `ALLOWED_ORIGINS` receive an
 `Access-Control-Allow-Origin` header. API clients without an `Origin` header can
 still call the service, but all protected endpoints require the API key. Rotate
-the key with `wrangler secret put API_KEY`; never log it.
+the key with `wrangler secret put DIRECTORY_ENGINE_API_KEY`; never log it.
+Wildcard origins are intentionally unsupported. The Worker accepts or generates
+an `X-Request-ID` and returns it on all REST and MCP responses.
 
 ## Rollback
 

@@ -91,7 +91,7 @@ async function dispatch(message: RpcRequest, env: Env) {
     return result(message.id, {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: "directory-engine", version: "0.2.0" },
+      serverInfo: { name: "directory-engine-api", version: "0.2.0" },
       instructions: "Inspect WordPress, GeoDirectory, and DIRECTORY_DB using read-only tools.",
     });
   }

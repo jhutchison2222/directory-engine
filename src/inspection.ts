@@ -1,6 +1,9 @@
 import type { Env } from "./types";
 
 export const VERSION = "0.2.0";
+const UPSTREAM_TIMEOUT_MS = 10_000;
+const MAX_UPSTREAM_BYTES = 1_048_576;
+const MAX_UPSTREAM_ATTEMPTS = 3;
 
 export const ROUTES = {
   wordpress: ["pages", "posts", "categories"],
@@ -20,7 +23,10 @@ function wordpressHeaders(env: Env): Headers {
 
 function baseUrl(env: Env): URL {
   if (!env.WORDPRESS_BASE_URL) throw new Error("WORDPRESS_BASE_URL is not configured");
-  return new URL(env.WORDPRESS_BASE_URL.replace(/\/$/, "") + "/");
+  const url = new URL(env.WORDPRESS_BASE_URL.replace(/\/$/, "") + "/");
+  if (url.protocol !== "https:") throw new Error("WORDPRESS_BASE_URL must use HTTPS");
+  if (url.username || url.password) throw new Error("WORDPRESS_BASE_URL must not contain credentials");
+  return url;
 }
 
 export async function wordpressGet(
@@ -30,8 +36,29 @@ export async function wordpressGet(
 ): Promise<unknown> {
   const url = new URL(path.replace(/^\//, ""), baseUrl(env));
   url.search = query.toString();
-  const response = await fetch(url, { headers: wordpressHeaders(env) });
-  const text = await response.text();
+  let response: Response | undefined;
+  for (let attempt = 1; attempt <= MAX_UPSTREAM_ATTEMPTS; attempt += 1) {
+    response = await fetch(url, {
+      headers: wordpressHeaders(env),
+      redirect: "manual",
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+    if (response.status < 500 && response.status !== 429) break;
+    if (attempt < MAX_UPSTREAM_ATTEMPTS) await response.body?.cancel();
+  }
+  if (!response) throw new Error("WordPress request failed");
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel();
+    throw new UpstreamError(502, { error: "redirect rejected" });
+  }
+  const declaredLength = Number(response.headers.get("content-length") ?? 0);
+  if (declaredLength > MAX_UPSTREAM_BYTES) {
+    await response.body?.cancel();
+    throw new UpstreamError(502, { error: "response too large" });
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > MAX_UPSTREAM_BYTES) throw new UpstreamError(502, { error: "response too large" });
+  const text = new TextDecoder().decode(bytes);
   let body: unknown;
   try {
     body = text ? JSON.parse(text) : null;

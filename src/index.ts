@@ -17,10 +17,13 @@ import type { Env } from "./types";
 
 function capabilities() {
   return {
-    service: "directory-engine",
+    service: "directory-engine-api",
     version: VERSION,
     read_only: true,
-    authentication: ["Authorization: Bearer <API_KEY>", "X-API-Key: <API_KEY>"],
+    authentication: [
+      "Authorization: Bearer <DIRECTORY_ENGINE_API_KEY>",
+      "X-Directory-Engine-Key: <DIRECTORY_ENGINE_API_KEY>",
+    ],
     database_binding: "DIRECTORY_DB",
     routes: {
       health: "/health",
@@ -69,7 +72,7 @@ export async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(request, env) });
   if (url.pathname === "/health" && request.method === "GET") {
-    return jsonResponse(request, env, { status: "ok", service: "directory-engine", version: VERSION });
+    return jsonResponse(request, env, { status: "ok", service: "directory-engine-api", version: VERSION });
   }
   if (!isAuthorized(request, env)) {
     return jsonResponse(request, env, { error: "Unauthorized" }, { status: 401 });

@@ -5,14 +5,17 @@ inspecting WordPress, GeoDirectory, and an existing D1 database. This repository
 preserves that REST contract and adds a stateless, read-only MCP endpoint at
 `/mcp`.
 
+The live Worker name remains `directory-engine-api`.
+
 It is **not** a public directory-search service. It does not create, migrate, or
 replace the deployed 21-table D1 database, and it exposes no write operations.
 
 ## Preserved HTTP API
 
 `GET /health` is public. Every `/v1/*` route and `POST /mcp` requires the
-configured `API_KEY`, supplied either as `Authorization: Bearer <API_KEY>` or
-`X-API-Key: <API_KEY>`.
+configured `DIRECTORY_ENGINE_API_KEY`, supplied either as
+`Authorization: Bearer <DIRECTORY_ENGINE_API_KEY>` or
+`X-Directory-Engine-Key: <DIRECTORY_ENGINE_API_KEY>`.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
@@ -34,6 +37,11 @@ configured `API_KEY`, supplied either as `Authorization: Bearer <API_KEY>` or
 
 Collection query strings are limited to known read-only WordPress and
 GeoDirectory parameters. Non-GET REST methods are rejected.
+
+The Worker preserves caller `X-Request-ID` values (or generates one), allows
+CORS only for exact configured origins, requires HTTPS WordPress URLs, refuses
+upstream redirects, retries bounded transient failures, and caps upstream
+responses at 1 MiB.
 
 ## MCP tools
 
@@ -64,7 +72,7 @@ existing D1 database ID. The deployed binding and configuration names are:
 - D1 binding: `DIRECTORY_DB`
 - Variable: `WORDPRESS_BASE_URL`
 - Variable: `ALLOWED_ORIGINS` (comma-separated exact origins)
-- Secret: `API_KEY`
+- Secret: `DIRECTORY_ENGINE_API_KEY`
 - Optional secrets: `WORDPRESS_USERNAME`, `WORDPRESS_APPLICATION_PASSWORD`
 
 No secret values belong in Git. See [the deployment guide](docs/deployment.md)

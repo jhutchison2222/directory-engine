@@ -18,7 +18,12 @@ const QUERY_KEYS = new Set([
 export function filterQuery(query: URLSearchParams): URLSearchParams {
   const filtered = new URLSearchParams();
   query.forEach((value, key) => {
-    if (QUERY_KEYS.has(key) && value.length <= 500) filtered.append(key, value);
+    if (!QUERY_KEYS.has(key) || value.length > 500) return;
+    if (key === "per_page") {
+      const perPage = Number(value);
+      if (!Number.isInteger(perPage) || perPage < 1 || perPage > 100) return;
+    }
+    filtered.append(key, value);
   });
   return filtered;
 }
@@ -44,7 +49,7 @@ export async function runReadOperation(
 ): Promise<unknown> {
   switch (name) {
     case "health_check":
-      return { status: "ok", service: "directory-engine", version: VERSION };
+      return { status: "ok", service: "directory-engine-api", version: VERSION };
     case "test_connections":
       return testConnections(env);
     case "get_database_status":
