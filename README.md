@@ -1,9 +1,9 @@
 # Directory Engine
 
-Directory Engine v0.2.0 is the deployed, read-only Cloudflare Worker for
-inspecting WordPress, GeoDirectory, and an existing D1 database. This repository
-preserves that REST contract and adds a stateless, read-only MCP endpoint at
-`/mcp`.
+Directory Engine v0.3.0 is the read-only Cloudflare Worker for inspecting
+WordPress, GeoDirectory, and the existing D1 database. This repository preserves
+the v0.2.0 REST contract and adds ChatGPT-compatible OAuth 2.1 protection to the
+stateless, read-only MCP endpoint at `/mcp`.
 
 The live Worker name remains `directory-engine-api`.
 The deployed v0.2.0 JavaScript baseline is preserved for review at
@@ -16,10 +16,15 @@ replace the deployed 21-table D1 database, and it exposes no write operations.
 
 ## Preserved HTTP API
 
-`GET /health` is public. Every `/v1/*` route and `POST /mcp` requires the
+`GET /health` is public. Every `/v1/*` route continues to require the
 configured `DIRECTORY_ENGINE_API_KEY`, supplied either as
 `Authorization: Bearer <DIRECTORY_ENGINE_API_KEY>` or
 `X-Directory-Engine-Key: <DIRECTORY_ENGINE_API_KEY>`.
+
+`POST /mcp` uses OAuth 2.1 with S256 PKCE and the single `mcp:read`
+scope. The owner approves ChatGPT on `/authorize` using the separately stored
+`DIRECTORY_ENGINE_OAUTH_ACCESS_CODE`. OAuth grants and tokens use a dedicated
+`OAUTH_KV` namespace; D1 is not used for OAuth and its schema is unchanged.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
@@ -75,9 +80,11 @@ configuration. `wrangler.example.toml` remains a placeholder template. The
 deployed binding and configuration names are:
 
 - D1 binding: `DIRECTORY_DB`
+- KV binding: `OAUTH_KV` (dedicated OAuth storage)
 - Variable: `WORDPRESS_BASE_URL`
 - Variable: `ALLOWED_ORIGINS` (comma-separated exact origins)
 - Secret: `DIRECTORY_ENGINE_API_KEY`
+- Secret: `DIRECTORY_ENGINE_OAUTH_ACCESS_CODE`
 - Optional secrets: `GEODIRECTORY_CONSUMER_KEY`, `GEODIRECTORY_CONSUMER_SECRET`
 
 No secret values belong in Git. See [the deployment guide](docs/deployment.md)
@@ -91,3 +98,4 @@ npm test
 npm run typecheck
 npm run dev
 ```
+

@@ -1,6 +1,7 @@
 name = "directory-engine-api"
-main = "src/index.ts"
+main = "src/worker.ts"
 compatibility_date = "2025-07-05"
+compatibility_flags = ["global_fetch_strictly_public"]
 workers_dev = true
 
 [vars]
@@ -12,7 +13,12 @@ binding = "DIRECTORY_DB"
 database_name = "directory-engine"
 database_id = "00000000-0000-0000-0000-000000000000"
 
-# Existing secret names (set with `wrangler secret put`; never add values here):
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "00000000000000000000000000000000"
+
+# Secrets (set with `wrangler secret put`; never add values here):
 # DIRECTORY_ENGINE_API_KEY
+# DIRECTORY_ENGINE_OAUTH_ACCESS_CODE
 # GEODIRECTORY_CONSUMER_KEY
 # GEODIRECTORY_CONSUMER_SECRET
