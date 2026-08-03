@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { route } from "../src/index";
 import { MCP_TOOLS } from "../src/mcp";
+import { handleAuthorization } from "../src/oauth";
 import type { Env } from "../src/types";
 
 function environment(): Env {
   return {
     DIRECTORY_ENGINE_API_KEY: "test-only-key",
+    DIRECTORY_ENGINE_OAUTH_ACCESS_CODE: "owner-access-code",
+    OAUTH_KV: {} as KVNamespace,
+    OAUTH_PROVIDER: {} as Env["OAUTH_PROVIDER"],
     WORDPRESS_BASE_URL: "https://wordpress.test",
     GEODIRECTORY_CONSUMER_KEY: "consumer-key",
     GEODIRECTORY_CONSUMER_SECRET: "consumer-secret",
@@ -40,10 +44,10 @@ async function payload(response: Response): Promise<any> {
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("deployed v0.2.0 contract", () => {
+describe("deployed v0.3.0 contract", () => {
   it("keeps health public and protects inspection routes", async () => {
     expect(await payload(await route(new Request("https://worker.test/health"), environment())))
-      .toMatchObject({ status: "ok", version: "0.2.0" });
+      .toMatchObject({ status: "ok", version: "0.3.0" });
     const denied = await route(new Request("https://worker.test/v1/capabilities"), environment());
     expect(denied.status).toBe(401);
     expect(await payload(denied)).toEqual({ error: "Unauthorized" });
@@ -67,7 +71,7 @@ describe("deployed v0.2.0 contract", () => {
   it("advertises the preserved routes, binding, and MCP tools", async () => {
     const response = await route(request("/v1/capabilities"), environment());
     const body = await payload(response);
-    expect(body).toMatchObject({ version: "0.2.0", read_only: true, database_binding: "DIRECTORY_DB" });
+    expect(body).toMatchObject({ version: "0.3.0", read_only: true, database_binding: "DIRECTORY_DB" });
     expect(body.routes.database).toEqual(["/v1/database/status", "/v1/database/schema"]);
     expect(body.routes.wordpress).toContain("/v1/wordpress/pages");
     expect(body.routes.geodirectory).toContain("/v1/geodirectory/listing-types");
@@ -83,7 +87,9 @@ describe("deployed v0.2.0 contract", () => {
   });
 
   it("proxies only read-only WordPress and GeoDirectory GET routes", async () => {
-    const fetchMock = vi.fn(async () => Response.json([{ id: 1, name: "Example" }]));
+    const fetchMock = vi.fn(async (_input: unknown, _init?: RequestInit) =>
+      Response.json([{ id: 1, name: "Example" }]),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const pages = await route(request("/v1/wordpress/pages?per_page=10&unsafe=discarded"), environment());
     expect(pages.status).toBe(200);
@@ -114,7 +120,7 @@ describe("deployed v0.2.0 contract", () => {
     ["/v1/geodirectory/locations", "/wp-json/geodir/v2/locations"],
     ["/v1/geodirectory/cities", "/wp-json/geodir/v2/locations/cities"],
   ])("preserves GET %s", async (workerPath: string, upstreamPath: string) => {
-    const fetchMock = vi.fn(async () => Response.json([]));
+    const fetchMock = vi.fn(async (_input: unknown, _init?: RequestInit) => Response.json([]));
     vi.stubGlobal("fetch", fetchMock);
     expect((await route(request(workerPath), environment())).status).toBe(200);
     expect(new URL(String(fetchMock.mock.calls[0][0])).pathname).toBe(upstreamPath);
@@ -135,7 +141,7 @@ describe("deployed v0.2.0 contract", () => {
       prepare: () => ({
         first: async () => { throw new Error("database detail must not escape"); },
       }) as unknown as D1PreparedStatement,
-    } as D1Database;
+    } as unknown as D1Database;
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new Error("wordpress detail must not escape"))
       .mockResolvedValueOnce(Response.json({ ok: true }));
@@ -183,7 +189,7 @@ describe("deployed v0.2.0 contract", () => {
   it("requires HTTPS for WordPress and strips out-of-range upstream pagination", async () => {
     const insecure = { ...environment(), WORDPRESS_BASE_URL: "http://wordpress.test" };
     expect((await route(request("/v1/wordpress/pages"), insecure)).status).toBe(500);
-    const fetchMock = vi.fn(async () => Response.json([]));
+    const fetchMock = vi.fn(async (_input: unknown, _init?: RequestInit) => Response.json([]));
     vi.stubGlobal("fetch", fetchMock);
     await route(request("/v1/wordpress/pages?per_page=101&page=2"), environment());
     expect(String(fetchMock.mock.calls[0][0])).toBe("https://wordpress.test/wp-json/wp/v2/pages?page=2");
@@ -230,7 +236,7 @@ describe("read-only MCP upgrade", () => {
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   }), environment());
 
-  it("requires the same API key as the REST inspection routes", async () => {
+  it("preserves direct API-key MCP testing behind the route helper", async () => {
     const response = await route(new Request("https://worker.test/mcp", {
       method: "POST", headers: { "content-type": "application/json" }, body: "{}",
     }), environment());
@@ -239,7 +245,7 @@ describe("read-only MCP upgrade", () => {
 
   it("initializes as the same v0.2.0 Worker", async () => {
     expect(await payload(await call("initialize"))).toMatchObject({
-      result: { protocolVersion: "2025-06-18", serverInfo: { name: "directory-engine-api", version: "0.2.0" } },
+      result: { protocolVersion: "2025-06-18", serverInfo: { name: "directory-engine-api", version: "0.3.0" } },
     });
   });
 
@@ -266,5 +272,83 @@ describe("read-only MCP upgrade", () => {
 
   it("does not expose any write tool", () => {
     expect(MCP_TOOLS.map(({ name }) => name).join(" ")).not.toMatch(/create|update|delete|write|publish|insert/i);
+  });
+});
+
+
+function oauthEnvironment(scope = ["mcp:read"]) {
+  const completeAuthorization = vi.fn(async () => ({
+    redirectTo: "https://chatgpt.com/aip/callback?code=test",
+  }));
+  const env = environment();
+  env.OAUTH_PROVIDER = {
+    parseAuthRequest: vi.fn(async () => ({
+      responseType: "code",
+      clientId: "chatgpt-client",
+      redirectUri: "https://chatgpt.com/aip/callback",
+      scope,
+      state: "state",
+      codeChallenge: "challenge",
+      codeChallengeMethod: "S256",
+      resource: "https://directory-engine-api.jhutchison.workers.dev/mcp",
+    })),
+    lookupClient: vi.fn(async () => ({
+      clientId: "chatgpt-client",
+      clientName: "ChatGPT",
+      redirectUris: ["https://chatgpt.com/aip/callback"],
+      grantTypes: ["authorization_code", "refresh_token"],
+      responseTypes: ["code"],
+      tokenEndpointAuthMethod: "none",
+    })),
+    completeAuthorization,
+  } as unknown as Env["OAUTH_PROVIDER"];
+  return { env, completeAuthorization };
+}
+
+describe("ChatGPT-compatible OAuth authorization", () => {
+  it("serves a no-store consent page describing only read access", async () => {
+    const { env } = oauthEnvironment();
+    const response = await handleAuthorization(new Request(
+      "https://worker.test/authorize?client_id=chatgpt-client&scope=mcp%3Aread",
+    ), env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.text()).toContain("13 read-only tools");
+  });
+
+  it("rejects a wrong owner access code without creating a grant", async () => {
+    const { env, completeAuthorization } = oauthEnvironment();
+    const response = await handleAuthorization(new Request(
+      "https://worker.test/authorize?client_id=chatgpt-client&scope=mcp%3Aread",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "access_code=wrong",
+      },
+    ), env);
+    expect(response.status).toBe(401);
+    expect(completeAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("grants only mcp:read after the owner access code is accepted", async () => {
+    const { env, completeAuthorization } = oauthEnvironment();
+    const response = await handleAuthorization(new Request(
+      "https://worker.test/authorize?client_id=chatgpt-client&scope=mcp%3Aread",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "access_code=owner-access-code",
+      },
+    ), env);
+    expect(response.status).toBe(302);
+    expect(completeAuthorization).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: ["mcp:read"] }),
+    );
+  });
+
+  it("rejects expanded scopes", async () => {
+    const { env } = oauthEnvironment(["mcp:read", "mcp:write"]);
+    const response = await handleAuthorization(new Request("https://worker.test/authorize"), env);
+    expect(response.status).toBe(400);
   });
 });

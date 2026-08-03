@@ -10,9 +10,13 @@ import {
   wordpressGet,
 } from "./inspection";
 import { handleMcp, MCP_TOOLS } from "./mcp";
+import { handleAuthorization } from "./oauth";
 import { filterQuery } from "./operations";
 import { corsHeaders, isAuthorized, jsonResponse } from "./security";
 import type { Env } from "./types";
+
+export const MCP_RESOURCE = "https://directory-engine-api.jhutchison.workers.dev/mcp";
+export const READ_SCOPE = "mcp:read";
 
 function capabilities() {
   return {
@@ -20,8 +24,9 @@ function capabilities() {
     version: VERSION,
     read_only: true,
     authentication: [
-      "Authorization: Bearer <DIRECTORY_ENGINE_API_KEY>",
-      "X-Directory-Engine-Key: <DIRECTORY_ENGINE_API_KEY>",
+      "OAuth 2.1 with mcp:read for /mcp",
+      "Authorization: Bearer <DIRECTORY_ENGINE_API_KEY> for /v1/*",
+      "X-Directory-Engine-Key: <DIRECTORY_ENGINE_API_KEY> for /v1/*",
     ],
     database_binding: "DIRECTORY_DB",
     routes: {
@@ -96,8 +101,26 @@ export async function route(request: Request, env: Env): Promise<Response> {
   }
 }
 
-export default {
-  fetch(request: Request, env: Env) {
+type OAuthProps = { permissions?: string[]; role?: string };
+type PropsContext = ExecutionContext & { props?: OAuthProps };
+
+export const mcpApiHandler = {
+  async fetch(request, env, context) {
+    const props = (context as PropsContext).props;
+    if (!props?.permissions?.includes(READ_SCOPE)) {
+      return jsonResponse(request, env, { error: "Forbidden" }, { status: 403 });
+    }
+    return handleMcp(request, env);
+  },
+} satisfies Pick<Required<ExportedHandler<Env>>, "fetch">;
+
+export const defaultHandler: ExportedHandler<Env> = {
+  fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/authorize") return handleAuthorization(request, env);
     return route(request, env);
   },
-} satisfies ExportedHandler<Env>;
+};
+
+export default defaultHandler;
+

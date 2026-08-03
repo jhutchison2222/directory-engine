@@ -1,18 +1,21 @@
 import type { Env } from "./types";
 
+export function constantTimeEqual(supplied: string, expected: string): boolean {
+  if (!supplied || supplied.length !== expected.length) return false;
+  let mismatch = 0;
+  for (let index = 0; index < supplied.length; index += 1) {
+    mismatch |= supplied.charCodeAt(index) ^ expected.charCodeAt(index);
+  }
+  return mismatch === 0;
+}
+
 export function isAuthorized(request: Request, env: Env): boolean {
   if (!env.DIRECTORY_ENGINE_API_KEY) return false;
   const bearer = request.headers.get("authorization");
   const supplied = bearer?.startsWith("Bearer ")
     ? bearer.slice(7)
     : request.headers.get("x-directory-engine-key");
-  if (!supplied || supplied.length !== env.DIRECTORY_ENGINE_API_KEY.length) return false;
-
-  let mismatch = 0;
-  for (let index = 0; index < supplied.length; index += 1) {
-    mismatch |= supplied.charCodeAt(index) ^ env.DIRECTORY_ENGINE_API_KEY.charCodeAt(index);
-  }
-  return mismatch === 0;
+  return supplied ? constantTimeEqual(supplied, env.DIRECTORY_ENGINE_API_KEY) : false;
 }
 
 export function corsHeaders(request: Request, env: Env): Headers {

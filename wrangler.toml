@@ -1,6 +1,7 @@
 name = "directory-engine-api"
-main = "src/index.ts"
+main = "src/worker.ts"
 compatibility_date = "2025-07-05"
+compatibility_flags = ["global_fetch_strictly_public"]
 workers_dev = true
 
 [vars]
@@ -10,3 +11,6 @@ WORDPRESS_BASE_URL = "https://master.directory-engine.net"
 binding = "DIRECTORY_DB"
 database_name = "directory-engine-prod"
 database_id = "c473821b-9273-4cf0-b02d-0c3a967f06eb"
+
+# OAUTH_KV is intentionally added after review, before merge, using the new
+# dedicated namespace ID created for this Worker.

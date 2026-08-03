@@ -1,4 +1,4 @@
-# Deploying the v0.2.0 inspection Worker and MCP upgrade
+# Deploying the v0.3.0 OAuth-protected MCP Worker
 
 This deployment preserves the existing read-only Directory Engine Worker. It
 must be bound to the already deployed D1 database; do not create a replacement
@@ -10,9 +10,11 @@ The Wrangler service name remains `directory-engine-api`.
 | Kind | Name | Purpose |
 | --- | --- | --- |
 | D1 binding | `DIRECTORY_DB` | Existing 21-table directory database |
+| KV binding | `OAUTH_KV` | Dedicated OAuth grants and tokens |
 | Variable | `WORDPRESS_BASE_URL` | WordPress site origin |
 | Variable | `ALLOWED_ORIGINS` | Comma-separated browser origins allowed by CORS |
-| Secret | `DIRECTORY_ENGINE_API_KEY` | Authorizes `/v1/*` and `/mcp` |
+| Secret | `DIRECTORY_ENGINE_API_KEY` | Authorizes `/v1/*` |
+| Secret | `DIRECTORY_ENGINE_OAUTH_ACCESS_CODE` | Owner approval on `/authorize` |
 | Optional secret | `GEODIRECTORY_CONSUMER_KEY` | GeoDirectory REST consumer key |
 | Optional secret | `GEODIRECTORY_CONSUMER_SECRET` | GeoDirectory REST consumer secret |
 
@@ -24,6 +26,7 @@ commits the Worker and D1 identifiers, but no secret values. Do not commit
 
 ```sh
 npx wrangler secret put DIRECTORY_ENGINE_API_KEY
+npx wrangler secret put DIRECTORY_ENGINE_OAUTH_ACCESS_CODE
 # Only if the deployed GeoDirectory REST API requires them:
 npx wrangler secret put GEODIRECTORY_CONSUMER_KEY
 npx wrangler secret put GEODIRECTORY_CONSUMER_SECRET
@@ -41,8 +44,9 @@ npm run typecheck
 npx wrangler deploy --dry-run
 ```
 
-Review the dry-run binding list and verify it says `DIRECTORY_DB`. There are no
-schema or migration files in this upgrade because D1 is inspected in place.
+Review the dry-run binding list and verify it contains the existing `DIRECTORY_DB`
+and the new dedicated `OAUTH_KV`. There are no schema or migration files in this
+upgrade because D1 is inspected in place.
 
 ## Deploy
 
@@ -81,26 +85,30 @@ curl --fail-with-body \
 The database status should report the existing table count (21 for the deployed
 v0.2.0 baseline) and binding `DIRECTORY_DB`.
 
-Initialize MCP and list its tools:
+Verify OAuth discovery before connecting ChatGPT:
 
 ```sh
-curl --fail-with-body \
-  -H "Authorization: Bearer $DIRECTORY_ENGINE_API_KEY" \
+curl --include \
   -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke-test","version":"1.0.0"}}}' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
   "$DIRECTORY_ENGINE_URL/mcp"
 curl --fail-with-body \
-  -H "Authorization: Bearer $DIRECTORY_ENGINE_API_KEY" \
-  -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  "$DIRECTORY_ENGINE_URL/mcp"
+  "$DIRECTORY_ENGINE_URL/.well-known/oauth-protected-resource/mcp"
+curl --fail-with-body \
+  "$DIRECTORY_ENGINE_URL/.well-known/oauth-authorization-server"
 ```
+
+The first request must return HTTP 401 with a `WWW-Authenticate` challenge
+containing `resource_metadata`. Complete the OAuth authorization from ChatGPT,
+then initialize and list tools through the authenticated app. `tools/list` must
+return exactly the 13 documented read-only tools.
 
 ## CORS and authorization checks
 
 Only exact origins in `ALLOWED_ORIGINS` receive an
 `Access-Control-Allow-Origin` header. API clients without an `Origin` header can
-still call the service, but all protected endpoints require the API key. Rotate
+still call the REST service, but `/v1/*` requires the API key and `/mcp` requires
+an OAuth token issued for the exact MCP resource. Rotate
 the key with `wrangler secret put DIRECTORY_ENGINE_API_KEY`; never log it.
 Wildcard origins are intentionally unsupported. The Worker accepts or generates
 an `X-Request-ID` and returns it on all REST and MCP responses.
@@ -111,3 +119,35 @@ Roll back the Worker deployment through Wrangler or the Cloudflare dashboard.
 Because this release neither migrates nor writes D1, Worker rollback does not
 require a database rollback. Use `npx wrangler tail` for operational diagnosis;
 request failures are sanitized before being returned to clients.
+
+
+## OAuth configuration before merge
+
+After review, create a new KV namespace dedicated to this Worker and add its ID
+to the existing `wrangler.toml` without changing `DIRECTORY_DB`:
+
+```sh
+npx wrangler kv namespace create OAUTH_KV
+```
+
+```toml
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "<new namespace ID>"
+```
+
+The OAuth contract is:
+
+- resource: `https://directory-engine-api.jhutchison.workers.dev/mcp`
+- authorization endpoint: `/authorize`
+- token endpoint: `/oauth/token`
+- dynamic client registration: `/oauth/register`
+- scope: `mcp:read`
+- PKCE: S256 only
+- access tokens: 1 hour
+- rotating refresh tokens: 30 days
+
+Do not merge until the production `OAUTH_KV` binding is committed and
+`DIRECTORY_ENGINE_OAUTH_ACCESS_CODE` is stored as a Worker secret. Never paste
+that secret into ChatGPT messages, GitHub, logs, URLs, or source files.
+

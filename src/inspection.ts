@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 const UPSTREAM_TIMEOUT_MS = 10_000;
 const MAX_UPSTREAM_BYTES = 1_048_576;
 const MAX_UPSTREAM_ATTEMPTS = 3;
@@ -151,3 +151,4 @@ export function geoPath(resource: string): string {
   if (!path) throw new Error("Unsupported GeoDirectory resource");
   return path;
 }
+

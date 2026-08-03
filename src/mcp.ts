@@ -91,7 +91,7 @@ async function dispatch(message: RpcRequest, env: Env) {
     return result(message.id, {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: "directory-engine-api", version: "0.2.0" },
+      serverInfo: { name: "directory-engine-api", version: "0.3.0" },
       instructions: "Inspect WordPress, GeoDirectory, and DIRECTORY_DB using read-only tools.",
     });
   }
@@ -141,3 +141,4 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
   if (!responses.length) return new Response(null, { status: 202, headers: corsHeaders(request, env) });
   return jsonResponse(request, env, Array.isArray(payload) ? responses : responses[0]);
 }
+
