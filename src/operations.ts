@@ -1,11 +1,14 @@
 import {
+  geoPath,
   getDatabaseSchema,
   getDatabaseStatus,
-  geoPath,
+  listSites,
+  resolveSiteConnection,
   testConnections,
   VERSION,
   wordpressCollectionPath,
   wordpressGet,
+  type ListSitesFilters,
 } from "./inspection";
 import type { Env } from "./types";
 
@@ -42,38 +45,71 @@ function toolQuery(args: Record<string, unknown>): URLSearchParams {
   return query;
 }
 
+// Tools that need to talk to a specific WordPress/GeoDirectory site. Every
+// one of these now accepts an optional `site_id` argument; when omitted,
+// resolveSiteConnection() falls back to the legacy single-site env vars,
+// so nothing that worked before this change stops working.
+const SITE_SCOPED_TOOLS = new Set([
+  "list_wordpress_pages",
+  "list_wordpress_posts",
+  "list_wordpress_categories",
+  "list_listing_types",
+  "list_taxonomies",
+  "list_fields",
+  "get_geodirectory_settings",
+  "list_locations",
+  "list_cities",
+]);
+
+function resourcePathFor(name: string): string {
+  switch (name) {
+    case "list_wordpress_pages":
+      return wordpressCollectionPath("pages");
+    case "list_wordpress_posts":
+      return wordpressCollectionPath("posts");
+    case "list_wordpress_categories":
+      return wordpressCollectionPath("categories");
+    case "list_listing_types":
+      return geoPath("listing-types");
+    case "list_taxonomies":
+      return geoPath("taxonomies");
+    case "list_fields":
+      return geoPath("fields");
+    case "get_geodirectory_settings":
+      return geoPath("settings");
+    case "list_locations":
+      return geoPath("locations");
+    case "list_cities":
+      return geoPath("cities");
+    default:
+      throw new Error("Unknown read operation");
+  }
+}
+
 export async function runReadOperation(
   name: string,
   args: Record<string, unknown>,
   env: Env,
 ): Promise<unknown> {
+  const siteId = typeof args.site_id === "string" ? args.site_id : undefined;
+  const { site_id: _siteId, ...rest } = args;
+
+  if (SITE_SCOPED_TOOLS.has(name)) {
+    const connection = await resolveSiteConnection(env, siteId);
+    return wordpressGet(connection, resourcePathFor(name), toolQuery(rest));
+  }
+
   switch (name) {
     case "health_check":
       return { status: "ok", service: "directory-engine-api", version: VERSION };
     case "test_connections":
-      return testConnections(env);
+      return testConnections(env, siteId);
     case "get_database_status":
       return getDatabaseStatus(env);
     case "get_database_schema":
       return getDatabaseSchema(env);
-    case "list_wordpress_pages":
-      return wordpressGet(env, wordpressCollectionPath("pages"), toolQuery(args));
-    case "list_wordpress_posts":
-      return wordpressGet(env, wordpressCollectionPath("posts"), toolQuery(args));
-    case "list_wordpress_categories":
-      return wordpressGet(env, wordpressCollectionPath("categories"), toolQuery(args));
-    case "list_listing_types":
-      return wordpressGet(env, geoPath("listing-types"), toolQuery(args));
-    case "list_taxonomies":
-      return wordpressGet(env, geoPath("taxonomies"), toolQuery(args));
-    case "list_fields":
-      return wordpressGet(env, geoPath("fields"), toolQuery(args));
-    case "get_geodirectory_settings":
-      return wordpressGet(env, geoPath("settings"), toolQuery(args));
-    case "list_locations":
-      return wordpressGet(env, geoPath("locations"), toolQuery(args));
-    case "list_cities":
-      return wordpressGet(env, geoPath("cities"), toolQuery(args));
+    case "list_sites":
+      return listSites(env, rest as ListSitesFilters);
     default:
       throw new Error("Unknown read operation");
   }

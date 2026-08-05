@@ -3,28 +3,113 @@ import { route } from "../src/index";
 import { MCP_TOOLS } from "../src/mcp";
 import type { Env } from "../src/types";
 
-function environment(): Env {
+interface SiteRow {
+  id: string;
+  site_key: string;
+  name: string;
+  base_url: string;
+  site_role: string;
+  archetype_id: string | null;
+  wordpress_site_id: string | null;
+  status: string;
+  timezone: string;
+  default_country_code: string;
+}
+
+interface ConnectionRow {
+  id: string;
+  site_id: string;
+  provider: string;
+  connection_key: string;
+  status: string;
+  secret_reference: string | null;
+  configuration_json: string | null;
+}
+
+/**
+ * A tiny hand-rolled D1 fake. It only understands the exact query shapes
+ * this Worker issues (matched by substring, same approach the original
+ * mock used for pragma_table_info) -- not a general SQL engine, just
+ * enough to exercise the sites/integration_connections/write_audit_log
+ * paths added for the multi-site work, on top of the original
+ * table_count/schema fixtures every pre-existing test already relied on.
+ */
+function fakeDirectoryDb(seed: { sites?: SiteRow[]; connections?: ConnectionRow[] } = {}): D1Database {
+  const sites: SiteRow[] = seed.sites ?? [];
+  const connections: ConnectionRow[] = seed.connections ?? [];
+
+  function prepare(sql: string) {
+    let params: unknown[] = [];
+    return {
+      bind(...bound: unknown[]) {
+        params = bound;
+        return this;
+      },
+      async first<T>(): Promise<T | null> {
+        if (sql.includes("FROM sites") && sql.includes("OR site_key")) {
+          const [needle] = params as [string];
+          return (sites.find((site) => site.id === needle || site.site_key === needle) ?? null) as T | null;
+        }
+        if (sql.includes("SELECT id FROM sites WHERE id = ?")) {
+          const [id] = params as [string];
+          const found = sites.find((site) => site.id === id);
+          return (found ? { id: found.id } : null) as T | null;
+        }
+        if (sql.includes("FROM integration_connections")) {
+          const [siteId] = params as [string];
+          const match = connections.find((c) => c.site_id === siteId && c.provider === "wordpress");
+          return (match ?? null) as T | null;
+        }
+        return { table_count: 21 } as T;
+      },
+      async all<T>() {
+        if (sql.includes("FROM sites") && sql.includes("ORDER BY name")) {
+          return { success: true, meta: {}, results: sites as unknown as T[] };
+        }
+        return {
+          success: true,
+          meta: {},
+          results: (sql.includes("pragma_table_info")
+            ? [{ table_name: "wp_posts", cid: 0, column_name: "ID", type: "INTEGER", not_null: 1, default_value: null, primary_key: 1 }]
+            : []) as unknown as T[],
+        };
+      },
+      async run() {
+        if (sql.includes("INSERT INTO sites")) {
+          const [id, site_key, name, base_url, site_role, archetype_id, wordpress_site_id, status, timezone, default_country_code] =
+            params as [string, string, string, string, string, string | null, string | null, string, string, string];
+          const row: SiteRow = { id, site_key, name, base_url, site_role, archetype_id, wordpress_site_id, status, timezone, default_country_code };
+          const index = sites.findIndex((site) => site.id === id);
+          if (index >= 0) sites[index] = row;
+          else sites.push(row);
+        } else if (sql.includes("INSERT INTO integration_connections")) {
+          const [id, site_id, provider, connection_key, status, secret_reference, configuration_json] =
+            params as [string, string, string, string, string, string | null, string | null];
+          const row: ConnectionRow = { id, site_id, provider, connection_key, status, secret_reference, configuration_json };
+          const index = connections.findIndex((c) => c.id === id);
+          if (index >= 0) connections[index] = row;
+          else connections.push(row);
+        }
+        // INSERT INTO write_audit_log and every other write in this suite
+        // just needs to succeed -- no assertions read it back.
+        return { success: true, meta: { last_row_id: 1 }, results: [] };
+      },
+    } as unknown as D1PreparedStatement;
+  }
+
+  return { prepare } as unknown as D1Database;
+}
+
+function environment(overrides: Partial<Env> = {}, dbSeed: { sites?: SiteRow[]; connections?: ConnectionRow[] } = {}): Env {
   return {
     DIRECTORY_ENGINE_API_KEY: "test-only-key",
+    DIRECTORY_ENGINE_WRITE_API_KEY: "test-only-write-key",
     WORDPRESS_BASE_URL: "https://wordpress.test",
     GEODIRECTORY_CONSUMER_KEY: "consumer-key",
     GEODIRECTORY_CONSUMER_SECRET: "consumer-secret",
     ALLOWED_ORIGINS: "https://console.test",
-    DIRECTORY_DB: {
-      prepare(sql: string) {
-        return {
-          bind() { return this; },
-          first: async () => ({ table_count: 21 }),
-          all: async () => ({
-            success: true,
-            meta: {},
-            results: sql.includes("pragma_table_info")
-              ? [{ table_name: "wp_posts", cid: 0, column_name: "ID", type: "INTEGER", not_null: 1, default_value: null, primary_key: 1 }]
-              : [],
-          }),
-        } as unknown as D1PreparedStatement;
-      },
-    } as D1Database,
+    DIRECTORY_DB: fakeDirectoryDb(dbSeed),
+    ...overrides,
   };
 }
 
@@ -34,16 +119,30 @@ function request(path: string, init: RequestInit = {}) {
   return new Request(`https://worker.test${path}`, { ...init, headers });
 }
 
+function writeRequest(path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set("x-directory-engine-key", "test-only-key");
+  headers.set("x-directory-engine-write-key", "test-only-write-key");
+  headers.set("content-type", "application/json");
+  return new Request(`https://worker.test${path}`, { ...init, headers });
+}
+
 async function payload(response: Response): Promise<any> {
   return response.json();
 }
 
+type FetchMock = ReturnType<typeof vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>>;
+
+function jsonFetchMock(body: unknown, init?: ResponseInit): FetchMock {
+  return vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json(body, init));
+}
+
 afterEach(() => vi.unstubAllGlobals());
 
-describe("deployed v0.2.0 contract", () => {
+describe("deployed v0.4.0 contract (v0.2.0 read-only behavior, preserved)", () => {
   it("keeps health public and protects inspection routes", async () => {
     expect(await payload(await route(new Request("https://worker.test/health"), environment())))
-      .toMatchObject({ status: "ok", version: "0.2.0" });
+      .toMatchObject({ status: "ok", version: "0.4.0" });
     const denied = await route(new Request("https://worker.test/v1/capabilities"), environment());
     expect(denied.status).toBe(401);
     expect(await payload(denied)).toEqual({ error: "Unauthorized" });
@@ -64,13 +163,15 @@ describe("deployed v0.2.0 contract", () => {
     expect(wrong.status).toBe(401);
   });
 
-  it("advertises the preserved routes, binding, and MCP tools", async () => {
+  it("advertises the read+write routes, binding, and MCP tools", async () => {
     const response = await route(request("/v1/capabilities"), environment());
     const body = await payload(response);
-    expect(body).toMatchObject({ version: "0.2.0", read_only: true, database_binding: "DIRECTORY_DB" });
+    expect(body).toMatchObject({ version: "0.4.0", read_only: false, database_binding: "DIRECTORY_DB" });
     expect(body.routes.database).toEqual(["/v1/database/status", "/v1/database/schema"]);
     expect(body.routes.wordpress).toContain("/v1/wordpress/pages");
     expect(body.routes.geodirectory).toContain("/v1/geodirectory/listing-types");
+    expect(body.routes.sites_read).toBe("/v1/sites");
+    expect(body.routes.write.sites).toBe("POST /v1/write/sites");
     expect(body.routes.mcp).toBe("/mcp");
   });
 
@@ -82,8 +183,8 @@ describe("deployed v0.2.0 contract", () => {
     expect(schema.tables.wp_posts[0]).toMatchObject({ column_name: "ID", primary_key: 1 });
   });
 
-  it("proxies only read-only WordPress and GeoDirectory GET routes", async () => {
-    const fetchMock = vi.fn(async () => Response.json([{ id: 1, name: "Example" }]));
+  it("proxies only read-only WordPress and GeoDirectory GET routes, falling back to the legacy single site", async () => {
+    const fetchMock = jsonFetchMock([{ id: 1, name: "Example" }]);
     vi.stubGlobal("fetch", fetchMock);
     const pages = await route(request("/v1/wordpress/pages?per_page=10&unsafe=discarded"), environment());
     expect(pages.status).toBe(200);
@@ -114,18 +215,19 @@ describe("deployed v0.2.0 contract", () => {
     ["/v1/geodirectory/locations", "/wp-json/geodir/v2/locations"],
     ["/v1/geodirectory/cities", "/wp-json/geodir/v2/locations/cities"],
   ])("preserves GET %s", async (workerPath: string, upstreamPath: string) => {
-    const fetchMock = vi.fn(async () => Response.json([]));
+    const fetchMock = jsonFetchMock([]);
     vi.stubGlobal("fetch", fetchMock);
     expect((await route(request(workerPath), environment())).status).toBe(200);
     expect(new URL(String(fetchMock.mock.calls[0][0])).pathname).toBe(upstreamPath);
   });
 
-  it("preserves the connection-test response contract", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ok: true })));
+  it("preserves the connection-test response contract (plus the new site_id field)", async () => {
+    vi.stubGlobal("fetch", jsonFetchMock({ ok: true }));
     expect(await payload(await route(request("/v1/connection-test"), environment()))).toEqual({
       database: { connected: true },
       wordpress: { connected: true },
       geodirectory: { connected: true },
+      site_id: null,
     });
   });
 
@@ -134,9 +236,9 @@ describe("deployed v0.2.0 contract", () => {
     failedDatabase.DIRECTORY_DB = {
       prepare: () => ({
         first: async () => { throw new Error("database detail must not escape"); },
-      }) as unknown as D1PreparedStatement,
-    } as D1Database;
-    const fetchMock = vi.fn()
+      }),
+    } as unknown as D1Database;
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
       .mockRejectedValueOnce(new Error("wordpress detail must not escape"))
       .mockResolvedValueOnce(Response.json({ ok: true }));
     vi.stubGlobal("fetch", fetchMock);
@@ -144,6 +246,7 @@ describe("deployed v0.2.0 contract", () => {
       database: { connected: false },
       wordpress: { connected: false },
       geodirectory: { connected: true },
+      site_id: null,
     });
   });
 
@@ -157,7 +260,7 @@ describe("deployed v0.2.0 contract", () => {
     expect(wildcard.headers.get("access-control-allow-origin")).toBeNull();
   });
 
-  it("answers preflight without credentials using only the preserved headers", async () => {
+  it("answers preflight without credentials using the write-aware header set", async () => {
     const response = await route(new Request("https://worker.test/v1/database/status", {
       method: "OPTIONS",
       headers: { origin: "https://console.test" },
@@ -165,12 +268,16 @@ describe("deployed v0.2.0 contract", () => {
     expect(response.status).toBe(204);
     expect(response.headers.get("access-control-allow-methods")).toBe("GET, OPTIONS");
     expect(response.headers.get("access-control-allow-headers")).toBe(
-      "authorization, content-type, x-directory-engine-key, x-request-id",
+      "authorization, content-type, x-directory-engine-key, x-directory-engine-write-key, x-directory-engine-actor, x-request-id",
     );
     const mcp = await route(new Request("https://worker.test/mcp", {
       method: "OPTIONS", headers: { origin: "https://console.test" },
     }), environment());
     expect(mcp.headers.get("access-control-allow-methods")).toBe("POST, OPTIONS");
+    const write = await route(new Request("https://worker.test/v1/write/sites", {
+      method: "OPTIONS", headers: { origin: "https://console.test" },
+    }), environment());
+    expect(write.headers.get("access-control-allow-methods")).toBe("POST, DELETE, OPTIONS");
   });
 
   it("returns or preserves request IDs on every response", async () => {
@@ -183,7 +290,7 @@ describe("deployed v0.2.0 contract", () => {
   it("requires HTTPS for WordPress and strips out-of-range upstream pagination", async () => {
     const insecure = { ...environment(), WORDPRESS_BASE_URL: "http://wordpress.test" };
     expect((await route(request("/v1/wordpress/pages"), insecure)).status).toBe(500);
-    const fetchMock = vi.fn(async () => Response.json([]));
+    const fetchMock = jsonFetchMock([]);
     vi.stubGlobal("fetch", fetchMock);
     await route(request("/v1/wordpress/pages?per_page=101&page=2"), environment());
     expect(String(fetchMock.mock.calls[0][0])).toBe("https://wordpress.test/wp-json/wp/v2/pages?page=2");
@@ -211,10 +318,10 @@ describe("deployed v0.2.0 contract", () => {
   });
 
   it("uses the baseline HTTP 500 contract for WordPress and GeoDirectory failures", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json(
+    vi.stubGlobal("fetch", jsonFetchMock(
       { code: "upstream_failure", message: "internal upstream detail" },
       { status: 403 },
-    )));
+    ));
     for (const path of ["/v1/wordpress/posts", "/v1/geodirectory/fields"]) {
       const response = await route(request(path), environment());
       expect(response.status).toBe(500);
@@ -223,7 +330,171 @@ describe("deployed v0.2.0 contract", () => {
   });
 });
 
-describe("read-only MCP upgrade", () => {
+describe("multi-site connection resolution", () => {
+  const restaurantsSite: SiteRow = {
+    id: "restaurants", site_key: "restaurants", name: "Restaurants",
+    base_url: "https://restaurants.directory-engine.net", site_role: "niche_template",
+    archetype_id: null, wordpress_site_id: null, status: "staging",
+    timezone: "America/Denver", default_country_code: "US",
+  };
+
+  it("lists registered sites via REST and MCP", async () => {
+    const env = environment({}, { sites: [restaurantsSite] });
+    const rest = await payload(await route(request("/v1/sites"), env));
+    expect(rest.items).toHaveLength(1);
+    expect(rest.items[0]).toMatchObject({ id: "restaurants", base_url: restaurantsSite.base_url });
+
+    const mcpResponse = await payload(await route(request("/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_sites", arguments: {} } }),
+    }), env));
+    expect(mcpResponse.result.structuredContent.items).toHaveLength(1);
+  });
+
+  it("routes a WordPress read to a specific site's base_url and its active connection's credentials", async () => {
+    const env = environment({}, {
+      sites: [restaurantsSite],
+      connections: [{
+        id: "restaurants-wordpress", site_id: "restaurants", provider: "wordpress",
+        connection_key: "restaurants-wp-geodirectory", status: "active",
+        secret_reference: "WP_CREDENTIALS_RESTAURANTS", configuration_json: null,
+      }],
+    });
+    env.WP_CREDENTIALS_RESTAURANTS = JSON.stringify({ consumerKey: "site-key", consumerSecret: "site-secret" });
+    const fetchMock = jsonFetchMock([]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await route(request("/v1/wordpress/pages?site_id=restaurants"), env);
+    expect(response.status).toBe(200);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("https://restaurants.directory-engine.net/wp-json/wp/v2/pages");
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("authorization")).toBe(
+      `Basic ${btoa("site-key:site-secret")}`,
+    );
+  });
+
+  it("omits auth for a site with no active connection yet, rather than reusing the legacy credentials", async () => {
+    const env = environment({}, { sites: [restaurantsSite] }); // no integration_connections row at all
+    const fetchMock = jsonFetchMock([]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await route(request("/v1/wordpress/pages?site_id=restaurants"), env);
+    expect(response.status).toBe(200);
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("authorization")).toBeNull();
+  });
+
+  it("fails clearly, without leaking detail, for an unregistered site_id", async () => {
+    const env = environment();
+    const response = await route(request("/v1/wordpress/pages?site_id=does-not-exist"), env);
+    expect(response.status).toBe(500);
+    expect(await payload(response)).toEqual({ error: "Inspection request failed" });
+  });
+
+  it("reports the resolved site_id from test_connections when one is given", async () => {
+    vi.stubGlobal("fetch", jsonFetchMock({ ok: true }));
+    const env = environment({}, { sites: [restaurantsSite] });
+    const body = await payload(await route(request("/v1/connection-test?site_id=restaurants"), env));
+    expect(body.site_id).toBe("restaurants");
+  });
+});
+
+describe("write layer (restored from the live v0.3.0 deploy, plus the new site tools)", () => {
+  it("rejects writes with a valid read key but no write key, and with the wrong write key", async () => {
+    const env = environment();
+    const noWriteKey = await route(request("/v1/write/sites", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ site_key: "hvac", name: "HVAC", base_url: "https://hvac.directory-engine.net" }),
+    }), env);
+    expect(noWriteKey.status).toBe(403);
+
+    const wrongWriteKey = await route(new Request("https://worker.test/v1/write/sites", {
+      method: "POST",
+      headers: {
+        "x-directory-engine-key": "test-only-key",
+        "x-directory-engine-write-key": "wrong-key",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ site_key: "hvac", name: "HVAC", base_url: "https://hvac.directory-engine.net" }),
+    }), env);
+    expect(wrongWriteKey.status).toBe(403);
+  });
+
+  it("creates a site via REST and it's immediately visible via list_sites", async () => {
+    const env = environment();
+    const created = await payload(await route(writeRequest("/v1/write/sites", {
+      method: "POST",
+      body: JSON.stringify({
+        site_key: "hvac", name: "HVAC", base_url: "https://hvac.directory-engine.net",
+        site_role: "niche_template", status: "staging",
+      }),
+    }), env));
+    expect(created).toMatchObject({ id: "hvac", site_key: "hvac", site_role: "niche_template", status: "staging" });
+
+    const listed = await payload(await route(request("/v1/sites"), env));
+    expect(listed.items.map((site: SiteRow) => site.id)).toEqual(["hvac"]);
+  });
+
+  it("rejects an insecure or invalid site_role on upsert_site", async () => {
+    const env = environment();
+    const insecure = await route(writeRequest("/v1/write/sites", {
+      method: "POST",
+      body: JSON.stringify({ site_key: "hvac", name: "HVAC", base_url: "http://hvac.directory-engine.net" }),
+    }), env);
+    expect(insecure.status).toBe(400);
+
+    const badRole = await route(writeRequest("/v1/write/sites", {
+      method: "POST",
+      body: JSON.stringify({
+        site_key: "hvac", name: "HVAC", base_url: "https://hvac.directory-engine.net", site_role: "not-a-real-role",
+      }),
+    }), env);
+    expect(badRole.status).toBe(400);
+  });
+
+  it("registers an integration connection for an existing site via MCP, and rejects an unknown site", async () => {
+    const env = environment({}, {
+      sites: [{
+        id: "hvac", site_key: "hvac", name: "HVAC", base_url: "https://hvac.directory-engine.net",
+        site_role: "niche_template", archetype_id: null, wordpress_site_id: null, status: "staging",
+        timezone: "America/Denver", default_country_code: "US",
+      }],
+    });
+    const call = (arguments_: unknown) => route(new Request("https://worker.test/mcp", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-directory-engine-key": "test-only-key",
+        "x-directory-engine-write-key": "test-only-write-key",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "upsert_integration_connection", arguments: arguments_ } }),
+    }), env);
+
+    const ok = await payload(await call({
+      site_id: "hvac", provider: "wordpress", connection_key: "hvac-wp-geodirectory",
+      status: "inactive", secret_reference: "WP_CREDENTIALS_HVAC",
+    }));
+    expect(ok.result.structuredContent).toMatchObject({ site_id: "hvac", status: "inactive" });
+
+    const unknownSite = await payload(await call({
+      site_id: "does-not-exist", provider: "wordpress", connection_key: "x",
+    }));
+    expect(unknownSite.result.isError).toBe(true);
+    expect(unknownSite.result.content[0].text).toMatch(/Unknown site_id/);
+  });
+
+  it("keeps the deprecated upsert_site_profile route working", async () => {
+    const env = environment();
+    const response = await route(writeRequest("/v1/write/site-profiles", {
+      method: "POST",
+      body: JSON.stringify({ domain: "hvac.directory-engine.net", niche: "hvac", scope_level: "metro", scope_value: "Denver Metro" }),
+    }), env);
+    expect(response.status).toBe(200);
+    expect(await payload(response)).toMatchObject({ domain: "hvac.directory-engine.net", niche: "hvac" });
+  });
+});
+
+describe("MCP contract", () => {
   const call = (method: string, params?: unknown) => route(request("/mcp", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -237,23 +508,34 @@ describe("read-only MCP upgrade", () => {
     expect(response.status).toBe(401);
   });
 
-  it("initializes as the same v0.2.0 Worker", async () => {
+  it("initializes as the v0.4.0 Worker", async () => {
     expect(await payload(await call("initialize"))).toMatchObject({
-      result: { protocolVersion: "2025-06-18", serverInfo: { name: "directory-engine-api", version: "0.2.0" } },
+      result: { protocolVersion: "2025-06-18", serverInfo: { name: "directory-engine-api", version: "0.4.0" } },
     });
   });
 
-  it("registers all required inspection tools and marks every tool read-only", async () => {
+  it("registers every read and write tool, correctly annotated as read-only or not", async () => {
     const names = MCP_TOOLS.map(({ name }) => name);
     expect(names).toEqual([
-      "health_check", "test_connections", "get_database_status", "get_database_schema",
+      "health_check", "test_connections", "get_database_status", "get_database_schema", "list_sites",
       "list_listing_types", "list_taxonomies", "list_fields", "get_geodirectory_settings",
       "list_locations", "list_cities", "list_wordpress_pages", "list_wordpress_posts",
       "list_wordpress_categories",
+      "upsert_site_profile", "upsert_site", "upsert_integration_connection", "upsert_master_listing",
+      "upsert_listing_site_link", "enqueue_publish", "dequeue_publish",
     ]);
-    expect(MCP_TOOLS.every(({ annotations }) =>
-      annotations.readOnlyHint && !annotations.destructiveHint && annotations.idempotentHint,
-    )).toBe(true);
+    const writeNames = new Set([
+      "upsert_site_profile", "upsert_site", "upsert_integration_connection", "upsert_master_listing",
+      "upsert_listing_site_link", "enqueue_publish", "dequeue_publish",
+    ]);
+    for (const toolDef of MCP_TOOLS) {
+      if (writeNames.has(toolDef.name)) {
+        expect(toolDef.annotations.readOnlyHint).toBe(false);
+      } else {
+        expect(toolDef.annotations.readOnlyHint).toBe(true);
+        expect(toolDef.annotations.destructiveHint).toBe(false);
+      }
+    }
   });
 
   it("calls database inspection through MCP", async () => {
@@ -264,7 +546,11 @@ describe("read-only MCP upgrade", () => {
     expect(body.result.isError).not.toBe(true);
   });
 
-  it("does not expose any write tool", () => {
-    expect(MCP_TOOLS.map(({ name }) => name).join(" ")).not.toMatch(/create|update|delete|write|publish|insert/i);
+  it("refuses a write tool call without a write key even with a valid read key", async () => {
+    const body = await payload(await call("tools/call", {
+      name: "upsert_site", arguments: { site_key: "hvac", name: "HVAC", base_url: "https://hvac.directory-engine.net" },
+    }));
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content[0].text).toMatch(/write-key/i);
   });
 });
