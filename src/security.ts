@@ -45,7 +45,7 @@ export function corsHeaders(request: Request, env: Env): Headers {
       pathname === "/mcp"
         ? "POST, OPTIONS"
         : pathname.startsWith("/v1/write/")
-          ? "POST, DELETE, OPTIONS"
+          ? "POST, PUT, DELETE, OPTIONS"
           : "GET, OPTIONS";
     headers.set("access-control-allow-origin", origin);
     headers.set("access-control-allow-methods", methods);

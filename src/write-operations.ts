@@ -1,3 +1,10 @@
+import {
+  geodirCategoriesPath,
+  geodirSettingsPath,
+  geodirTagsPath,
+  resolveSiteConnection,
+  wordpressWrite,
+} from "./inspection";
 import type { Env } from "./types";
 
 export class ValidationError extends Error {}
@@ -384,6 +391,92 @@ export async function dequeuePublish(env: Env, request: Request, id: number) {
   return { id, dequeued: true };
 }
 
+// The three functions below proxy through to GeoDirectory's own geodir/v2
+// REST API on the target site, rather than through master_listings/D1 --
+// they configure the site itself (categories, tags, settings), not listing
+// data. This is the cross-site automation lever from "start scoping" ->
+// "let's do a combo" -- see worker-multisite-scoping.md and
+// architecture-overview.md for the full writeup, including why custom
+// fields are NOT covered here (no write endpoint exists for those).
+
+export async function upsertGeodirCategory(env: Env, request: Request, input: Record<string, unknown>) {
+  const site_id = requireString(input.site_id, "site_id", { maxLength: 100 });
+  const name = requireString(input.name, "name", { maxLength: 200 });
+  const description = optionalString(input.description, "description", { maxLength: 2000 });
+  const slug = optionalString(input.slug, "slug", { maxLength: 200 });
+  const parent = optionalNumber(input.parent, "parent");
+  const fa_icon = optionalString(input.fa_icon, "fa_icon", { maxLength: 100 });
+  const fa_icon_color = optionalString(input.fa_icon_color, "fa_icon_color", { maxLength: 20 });
+  const id = optionalNumber(input.id, "id");
+
+  const connection = await resolveSiteConnection(env, site_id);
+  const body: Record<string, unknown> = { name };
+  if (description !== null) body.description = description;
+  if (slug !== null) body.slug = slug;
+  if (parent !== null) body.parent = parent;
+  if (fa_icon !== null) body.fa_icon = fa_icon;
+  if (fa_icon_color !== null) body.fa_icon_color = fa_icon_color;
+
+  const upstream = await wordpressWrite(
+    connection,
+    geodirCategoriesPath(id ?? undefined),
+    id ? "PUT" : "POST",
+    body,
+  );
+
+  await logAudit(env, {
+    action: "upsert_geodir_category",
+    site_id,
+    actor: actorFrom(request),
+    detail: { name, id, parent },
+  });
+  return upstream;
+}
+
+export async function upsertGeodirTag(env: Env, request: Request, input: Record<string, unknown>) {
+  const site_id = requireString(input.site_id, "site_id", { maxLength: 100 });
+  const name = requireString(input.name, "name", { maxLength: 200 });
+  const description = optionalString(input.description, "description", { maxLength: 2000 });
+  const slug = optionalString(input.slug, "slug", { maxLength: 200 });
+  const id = optionalNumber(input.id, "id");
+
+  const connection = await resolveSiteConnection(env, site_id);
+  const body: Record<string, unknown> = { name };
+  if (description !== null) body.description = description;
+  if (slug !== null) body.slug = slug;
+
+  const upstream = await wordpressWrite(connection, geodirTagsPath(id ?? undefined), id ? "PUT" : "POST", body);
+
+  await logAudit(env, {
+    action: "upsert_geodir_tag",
+    site_id,
+    actor: actorFrom(request),
+    detail: { name, id },
+  });
+  return upstream;
+}
+
+export async function updateGeodirSettings(env: Env, request: Request, input: Record<string, unknown>) {
+  const site_id = requireString(input.site_id, "site_id", { maxLength: 100 });
+  const group_id = requireString(input.group_id, "group_id", { maxLength: 100 });
+  const setting_id = requireString(input.id, "id", { maxLength: 100 });
+  if (input.value === undefined) throw new ValidationError("value is required");
+
+  const connection = await resolveSiteConnection(env, site_id);
+  const upstream = await wordpressWrite(connection, geodirSettingsPath(group_id), "PUT", {
+    id: setting_id,
+    value: input.value,
+  });
+
+  await logAudit(env, {
+    action: "update_geodir_settings",
+    site_id,
+    actor: actorFrom(request),
+    detail: { group_id, id: setting_id },
+  });
+  return upstream;
+}
+
 export async function runWriteOperation(
   name: string,
   args: Record<string, unknown>,
@@ -408,6 +501,12 @@ export async function runWriteOperation(
       if (typeof id !== "number" || !Number.isInteger(id)) throw new ValidationError("id must be an integer");
       return dequeuePublish(env, request, id);
     }
+    case "upsert_geodir_category":
+      return upsertGeodirCategory(env, request, args);
+    case "upsert_geodir_tag":
+      return upsertGeodirTag(env, request, args);
+    case "update_geodir_settings":
+      return updateGeodirSettings(env, request, args);
     default:
       throw new Error("Unknown write operation");
   }

@@ -6,6 +6,7 @@ import {
   resolveSiteConnection,
   ROUTES,
   safeError,
+  testAppPasswordConnection,
   testConnections,
   VERSION,
   wordpressCollectionPath,
@@ -21,6 +22,9 @@ import {
   listPublishQueue,
   parseJsonBody,
   safeWriteError,
+  updateGeodirSettings,
+  upsertGeodirCategory,
+  upsertGeodirTag,
   upsertIntegrationConnection,
   upsertListingSiteLink,
   upsertMasterListing,
@@ -43,6 +47,7 @@ function capabilities() {
       health: "/health",
       capabilities: "/v1/capabilities",
       connection_test: "/v1/connection-test",
+      test_wp_app_password: "/v1/test/wp-app-password?site=<site_key> (temporary diagnostic -- see inspection.ts)",
       database: ["/v1/database/status", "/v1/database/schema"],
       sites_read: "/v1/sites",
       wordpress: ROUTES.wordpress.map((name) => `/v1/wordpress/${name}`),
@@ -56,6 +61,9 @@ function capabilities() {
         listing_site_links: "POST /v1/write/listing-site-links",
         publish_queue_enqueue: "POST /v1/write/publish-queue",
         publish_queue_dequeue: "DELETE /v1/write/publish-queue/:id",
+        geodir_categories: "POST /v1/write/geodir-categories (or PUT .../:id to update)",
+        geodir_tags: "POST /v1/write/geodir-tags (or PUT .../:id to update)",
+        geodir_settings: "PUT /v1/write/geodir-settings/:group_id",
       },
       mcp: "/mcp",
     },
@@ -63,6 +71,8 @@ function capabilities() {
     notes: [
       "Every WordPress/GeoDirectory read route and MCP tool now accepts an optional ?site_id= (routes) or site_id argument (MCP tools) to target a specific site.",
       "Omitting site_id falls back to the legacy WORDPRESS_BASE_URL/GEODIRECTORY_CONSUMER_KEY/SECRET env vars, unchanged from v0.2.0/v0.3.0.",
+      "geodir-categories/geodir-tags/geodir-settings proxy directly to each site's own geodir/v2 REST API -- they configure the site (categories, tags, settings), not master_listings.",
+      "GeoDirectory custom fields have no write endpoint on geodir/v2 -- field creation still requires that site's own wp-admin.",
     ],
   };
 }
@@ -74,6 +84,13 @@ async function readRoute(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/v1/connection-test") {
     return jsonResponse(request, env, await testConnections(env, siteId));
+  }
+  if (url.pathname === "/v1/test/wp-app-password") {
+    const site = url.searchParams.get("site");
+    if (!site) {
+      return jsonResponse(request, env, { error: "Missing ?site= query param (e.g. ?site=restaurants)" }, { status: 400 });
+    }
+    return jsonResponse(request, env, await testAppPasswordConnection(env, site));
   }
   if (url.pathname === "/v1/database/status") {
     return jsonResponse(request, env, await getDatabaseStatus(env));
@@ -156,6 +173,35 @@ async function writeRoute(request: Request, env: Env, url: URL): Promise<Respons
     if (request.method !== "DELETE") return methodNotAllowed(request, env, "DELETE, OPTIONS");
     return jsonResponse(request, env, await dequeuePublish(env, request, Number(dequeueMatch[1])));
   }
+
+  const geodirCategoryMatch = url.pathname.match(/^\/v1\/write\/geodir-categories(?:\/(\d+))?$/);
+  if (geodirCategoryMatch) {
+    if (request.method !== "POST" && request.method !== "PUT") {
+      return methodNotAllowed(request, env, "POST, PUT, OPTIONS");
+    }
+    const body = await parseJsonBody(request);
+    if (geodirCategoryMatch[1]) body.id = Number(geodirCategoryMatch[1]);
+    return jsonResponse(request, env, await upsertGeodirCategory(env, request, body));
+  }
+  const geodirTagMatch = url.pathname.match(/^\/v1\/write\/geodir-tags(?:\/(\d+))?$/);
+  if (geodirTagMatch) {
+    if (request.method !== "POST" && request.method !== "PUT") {
+      return methodNotAllowed(request, env, "POST, PUT, OPTIONS");
+    }
+    const body = await parseJsonBody(request);
+    if (geodirTagMatch[1]) body.id = Number(geodirTagMatch[1]);
+    return jsonResponse(request, env, await upsertGeodirTag(env, request, body));
+  }
+  const geodirSettingsMatch = url.pathname.match(/^\/v1\/write\/geodir-settings\/([^/]+)$/);
+  if (geodirSettingsMatch) {
+    if (request.method !== "PUT" && request.method !== "POST") {
+      return methodNotAllowed(request, env, "POST, PUT, OPTIONS");
+    }
+    const body = await parseJsonBody(request);
+    body.group_id = decodeURIComponent(geodirSettingsMatch[1]);
+    return jsonResponse(request, env, await updateGeodirSettings(env, request, body));
+  }
+
   return jsonResponse(request, env, { error: "Not found" }, { status: 404 });
 }
 

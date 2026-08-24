@@ -277,7 +277,7 @@ describe("deployed v0.4.0 contract (v0.2.0 read-only behavior, preserved)", () =
     const write = await route(new Request("https://worker.test/v1/write/sites", {
       method: "OPTIONS", headers: { origin: "https://console.test" },
     }), environment());
-    expect(write.headers.get("access-control-allow-methods")).toBe("POST, DELETE, OPTIONS");
+    expect(write.headers.get("access-control-allow-methods")).toBe("POST, PUT, DELETE, OPTIONS");
   });
 
   it("returns or preserves request IDs on every response", async () => {
@@ -492,6 +492,108 @@ describe("write layer (restored from the live v0.3.0 deploy, plus the new site t
     expect(response.status).toBe(200);
     expect(await payload(response)).toMatchObject({ domain: "hvac.directory-engine.net", niche: "hvac" });
   });
+
+  function withActiveRestaurantsConnection(): Env {
+    const env = environment({}, {
+      sites: [{
+        id: "restaurants", site_key: "restaurants", name: "Restaurants",
+        base_url: "https://restaurants.directory-engine.net", site_role: "niche_template",
+        archetype_id: null, wordpress_site_id: null, status: "staging",
+        timezone: "America/Denver", default_country_code: "US",
+      }],
+      connections: [{
+        id: "restaurants-wordpress", site_id: "restaurants", provider: "wordpress",
+        connection_key: "restaurants-wp-geodirectory", status: "active",
+        secret_reference: "WP_CREDENTIALS_RESTAURANTS", configuration_json: null,
+      }],
+    });
+    env.WP_CREDENTIALS_RESTAURANTS = JSON.stringify({ consumerKey: "site-key", consumerSecret: "site-secret" });
+    return env;
+  }
+
+  it("creates a GeoDirectory category on a specific site by proxying to its own geodir/v2 REST API", async () => {
+    const env = withActiveRestaurantsConnection();
+    const fetchMock = jsonFetchMock({ id: 42, name: "Pizza", parent: 7 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await route(writeRequest("/v1/write/geodir-categories", {
+      method: "POST",
+      body: JSON.stringify({ site_id: "restaurants", name: "Pizza", parent: 7 }),
+    }), env);
+    expect(response.status).toBe(200);
+    expect(await payload(response)).toMatchObject({ id: 42, name: "Pizza", parent: 7 });
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "https://restaurants.directory-engine.net/wp-json/geodir/v2/places/categories",
+    );
+    const init = fetchMock.mock.calls[0][1];
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Basic ${btoa("site-key:site-secret")}`);
+    expect(JSON.parse(String(init?.body))).toMatchObject({ name: "Pizza", parent: 7 });
+  });
+
+  it("updates an existing GeoDirectory category by id instead of creating a new one", async () => {
+    const env = withActiveRestaurantsConnection();
+    const fetchMock = jsonFetchMock({ id: 42, name: "Pizza & Italian" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await route(writeRequest("/v1/write/geodir-categories/42", {
+      method: "PUT",
+      body: JSON.stringify({ site_id: "restaurants", name: "Pizza & Italian" }),
+    }), env);
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "https://restaurants.directory-engine.net/wp-json/geodir/v2/places/categories/42",
+    );
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("PUT");
+  });
+
+  it("creates a GeoDirectory tag via MCP", async () => {
+    const env = withActiveRestaurantsConnection();
+    const fetchMock = jsonFetchMock({ id: 5, name: "Gluten-Free" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const call = (arguments_: unknown) => route(new Request("https://worker.test/mcp", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-directory-engine-key": "test-only-key",
+        "x-directory-engine-write-key": "test-only-write-key",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "upsert_geodir_tag", arguments: arguments_ } }),
+    }), env);
+
+    const response = await payload(await call({ site_id: "restaurants", name: "Gluten-Free" }));
+    expect(response.result.structuredContent).toMatchObject({ id: 5, name: "Gluten-Free" });
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "https://restaurants.directory-engine.net/wp-json/geodir/v2/places/tags",
+    );
+  });
+
+  it("updates a single GeoDirectory setting by group_id and id", async () => {
+    const env = withActiveRestaurantsConnection();
+    const fetchMock = jsonFetchMock({ id: "maps_api_key", value: "abc123" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await route(writeRequest("/v1/write/geodir-settings/maps", {
+      method: "PUT",
+      body: JSON.stringify({ site_id: "restaurants", id: "maps_api_key", value: "abc123" }),
+    }), env);
+    expect(response.status).toBe(200);
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "https://restaurants.directory-engine.net/wp-json/geodir/v2/settings/maps",
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ id: "maps_api_key", value: "abc123" });
+  });
+
+  it("rejects a geodir-settings update with no value", async () => {
+    const env = withActiveRestaurantsConnection();
+    const response = await route(writeRequest("/v1/write/geodir-settings/maps", {
+      method: "PUT",
+      body: JSON.stringify({ site_id: "restaurants", id: "maps_api_key" }),
+    }), env);
+    expect(response.status).toBe(400);
+  });
 });
 
 describe("MCP contract", () => {
@@ -523,10 +625,12 @@ describe("MCP contract", () => {
       "list_wordpress_categories",
       "upsert_site_profile", "upsert_site", "upsert_integration_connection", "upsert_master_listing",
       "upsert_listing_site_link", "enqueue_publish", "dequeue_publish",
+      "upsert_geodir_category", "upsert_geodir_tag", "update_geodir_settings",
     ]);
     const writeNames = new Set([
       "upsert_site_profile", "upsert_site", "upsert_integration_connection", "upsert_master_listing",
       "upsert_listing_site_link", "enqueue_publish", "dequeue_publish",
+      "upsert_geodir_category", "upsert_geodir_tag", "update_geodir_settings",
     ]);
     for (const toolDef of MCP_TOOLS) {
       if (writeNames.has(toolDef.name)) {

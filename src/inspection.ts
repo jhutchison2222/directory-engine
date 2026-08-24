@@ -178,6 +178,76 @@ export async function wordpressGet(
   return body;
 }
 
+/**
+ * Write counterpart to wordpressGet(), for the handful of GeoDirectory v2
+ * REST endpoints that support POST/PUT/PATCH (places categories, places
+ * tags, settings) -- see worker-multisite-scoping.md's note on the geodir/v2
+ * namespace discovered on the live Restaurants site. Uses the same auth,
+ * timeout, retry, and response-size guards as wordpressGet.
+ */
+export async function wordpressWrite(
+  connection: SiteConnection,
+  path: string,
+  method: "POST" | "PUT" | "PATCH",
+  body: unknown,
+): Promise<unknown> {
+  const url = new URL(path.replace(/^\//, ""), connection.baseUrl);
+  const payload = JSON.stringify(body ?? {});
+  let response: Response | undefined;
+  for (let attempt = 1; attempt <= MAX_UPSTREAM_ATTEMPTS; attempt += 1) {
+    const headers = wordpressHeaders(connection);
+    headers.set("content-type", "application/json");
+    response = await fetch(url, {
+      method,
+      headers,
+      body: payload,
+      redirect: "manual",
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+    if (response.status < 500 && response.status !== 429) break;
+    if (attempt < MAX_UPSTREAM_ATTEMPTS) await response.body?.cancel();
+  }
+  if (!response) throw new Error("WordPress request failed");
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel();
+    throw new UpstreamError(502, { error: "redirect rejected" });
+  }
+  const declaredLength = Number(response.headers.get("content-length") ?? 0);
+  if (declaredLength > MAX_UPSTREAM_BYTES) {
+    await response.body?.cancel();
+    throw new UpstreamError(502, { error: "response too large" });
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > MAX_UPSTREAM_BYTES) throw new UpstreamError(502, { error: "response too large" });
+  const text = new TextDecoder().decode(bytes);
+  let responseBody: unknown;
+  try {
+    responseBody = text ? JSON.parse(text) : null;
+  } catch {
+    responseBody = { message: text };
+  }
+  if (!response.ok) throw new UpstreamError(response.status, responseBody);
+  return responseBody;
+}
+
+// Path builders for the writable geodir/v2 endpoints. Confirmed live against
+// restaurants.directory-engine.net's REST discovery document (2026-08-07):
+// places/categories and places/tags support GET+POST on the collection and
+// GET+POST+PUT+PATCH on /{id}; settings/{group_id} supports GET+POST+PUT+PATCH.
+// Custom fields (geodir/v2/fields, geodir/v2/places/fields) are GET-only --
+// no write endpoint exists for those, so field creation stays a wp-admin task.
+export function geodirCategoriesPath(id?: number): string {
+  return id ? `wp-json/geodir/v2/places/categories/${id}` : "wp-json/geodir/v2/places/categories";
+}
+
+export function geodirTagsPath(id?: number): string {
+  return id ? `wp-json/geodir/v2/places/tags/${id}` : "wp-json/geodir/v2/places/tags";
+}
+
+export function geodirSettingsPath(groupId: string): string {
+  return `wp-json/geodir/v2/settings/${encodeURIComponent(groupId)}`;
+}
+
 export async function getDatabaseStatus(env: Env) {
   const result = await env.DIRECTORY_DB.prepare(`
     SELECT COUNT(*) AS table_count
@@ -294,4 +364,82 @@ export function geoPath(resource: string): string {
   const path = paths[resource];
   if (!path) throw new Error("Unsupported GeoDirectory resource");
   return path;
+}
+
+/**
+ * TEMPORARY diagnostic helper -- verifies a WP_APP_PASSWORD_<SITE> secret
+ * was entered correctly in Cloudflare (right shape, one continuous JSON
+ * line, real credentials) ahead of the real publish-queue processor being
+ * built. This is not the long-term multi-credential design: integration_
+ * connections still only has one secret_reference slot per site, and this
+ * reads the WP_APP_PASSWORD_<SITE> binding directly by a hardcoded naming
+ * convention rather than through that table. See worker-multisite-scoping.md's
+ * "Not yet done" list. Safe to remove once the real processor supersedes it,
+ * or to extend if it proves useful to keep around.
+ *
+ * Uses WordPress's own core REST API (wp/v2/users/me) rather than geodir/v2,
+ * since Application Passwords authenticate against WordPress core, not
+ * GeoDirectory's Consumer Key/Secret scheme. A GET to users/me is read-only --
+ * it just confirms who the credential authenticates as, no listing created.
+ */
+export async function testAppPasswordConnection(env: Env, siteKey: string) {
+  try {
+    const site = await env.DIRECTORY_DB.prepare(
+      `SELECT id, site_key, base_url FROM sites WHERE site_key = ? LIMIT 1`,
+    )
+      .bind(siteKey)
+      .first<{ id: string; site_key: string; base_url: string }>();
+    if (!site) throw new Error(`Unknown site_key: ${siteKey}`);
+
+    const baseUrl = parseBaseUrl(site.base_url, `sites.base_url for ${siteKey}`);
+    const bindingName = `WP_APP_PASSWORD_${siteKey.toUpperCase()}`;
+    const rawSecret = env[bindingName];
+    if (typeof rawSecret !== "string" || !rawSecret) {
+      throw new Error(`Secret binding "${bindingName}" is not configured on this Worker`);
+    }
+
+    let username: string | undefined;
+    let applicationPassword: string | undefined;
+    try {
+      const parsed = JSON.parse(rawSecret) as { username?: unknown; applicationPassword?: unknown };
+      username = typeof parsed.username === "string" ? parsed.username : undefined;
+      applicationPassword = typeof parsed.applicationPassword === "string" ? parsed.applicationPassword : undefined;
+    } catch {
+      throw new Error(`Secret binding "${bindingName}" is not valid JSON`);
+    }
+    if (!username || !applicationPassword) {
+      throw new Error(`Secret binding "${bindingName}" is missing "username" or "applicationPassword"`);
+    }
+
+    const url = new URL("wp-json/wp/v2/users/me", baseUrl);
+    const headers = new Headers({
+      accept: "application/json",
+      authorization: `Basic ${btoa(`${username}:${applicationPassword}`)}`,
+    });
+    const response = await fetch(url, {
+      headers,
+      redirect: "manual",
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+    const text = await response.text();
+    let body: unknown;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = { message: text };
+    }
+    if (!response.ok) {
+      return { site_id: site.id, binding: bindingName, authenticated: false, status: response.status, detail: body };
+    }
+    const user = body as { id?: number; name?: string; roles?: string[] };
+    return {
+      site_id: site.id,
+      binding: bindingName,
+      authenticated: true,
+      status: response.status,
+      user: { id: user.id, name: user.name, roles: user.roles },
+    };
+  } catch (error) {
+    return { authenticated: false, error: safeError(error) };
+  }
 }

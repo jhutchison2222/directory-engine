@@ -188,6 +188,44 @@ const WRITE_TOOLS = [
     { id: { type: "integer", minimum: 1 } },
     { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   ),
+  tool(
+    "upsert_geodir_category",
+    "Create or update a GeoDirectory places category on a specific site, by proxying to that site's own geodir/v2 REST API (name required; pass parent to create a subcategory; pass id to update an existing category instead of creating one). Requires a write key.",
+    {
+      site_id: { type: "string", maxLength: 100 },
+      id: { type: "integer" },
+      name: { type: "string", maxLength: 200 },
+      description: { type: "string", maxLength: 2000 },
+      slug: { type: "string", maxLength: 200 },
+      parent: { type: "integer" },
+      fa_icon: { type: "string", maxLength: 100 },
+      fa_icon_color: { type: "string", maxLength: 20 },
+    },
+    { readOnlyHint: false },
+  ),
+  tool(
+    "upsert_geodir_tag",
+    "Create or update a GeoDirectory places tag on a specific site, by proxying to that site's own geodir/v2 REST API. Requires a write key.",
+    {
+      site_id: { type: "string", maxLength: 100 },
+      id: { type: "integer" },
+      name: { type: "string", maxLength: 200 },
+      description: { type: "string", maxLength: 2000 },
+      slug: { type: "string", maxLength: 200 },
+    },
+    { readOnlyHint: false },
+  ),
+  tool(
+    "update_geodir_settings",
+    "Update a single GeoDirectory setting (by group_id and setting id) on a specific site, by proxying to that site's own geodir/v2 REST API. Note: GeoDirectory custom fields have no write endpoint and cannot be managed through this tool -- those still require the site's own wp-admin. Requires a write key.",
+    {
+      site_id: { type: "string", maxLength: 100 },
+      group_id: { type: "string", maxLength: 100 },
+      id: { type: "string", maxLength: 100 },
+      value: {},
+    },
+    { readOnlyHint: false, idempotentHint: false },
+  ),
 ];
 
 export const MCP_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];
@@ -244,7 +282,7 @@ async function dispatch(message: RpcRequest, request: Request, env: Env, writeAu
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: "directory-engine-api", version: "0.4.0" },
       instructions:
-        "Inspect WordPress, GeoDirectory, and DIRECTORY_DB using read-only tools (pass site_id to target a specific site; omit it for the legacy default site), or write via upsert_site / upsert_integration_connection / upsert_master_listing / upsert_listing_site_link / enqueue_publish / dequeue_publish (requires X-Directory-Engine-Write-Key).",
+        "Inspect WordPress, GeoDirectory, and DIRECTORY_DB using read-only tools (pass site_id to target a specific site; omit it for the legacy default site), or write via upsert_site / upsert_integration_connection / upsert_master_listing / upsert_listing_site_link / enqueue_publish / dequeue_publish / upsert_geodir_category / upsert_geodir_tag / update_geodir_settings (requires X-Directory-Engine-Write-Key). Custom fields have no write endpoint on GeoDirectory's own REST API and still require wp-admin.",
     });
   }
   if (message.method === "ping") return result(message.id, {});
