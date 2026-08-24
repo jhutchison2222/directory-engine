@@ -751,7 +751,7 @@ describe("publish queue processor", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toMatchObject({
       title: "Tony's Pizza", status: "draft", post_category: [42],
       street: "123 Main St", city: "Denver", region: "CO", country: "US",
-      latitude: 39.7, longitude: -104.9, phone: "555-1234", website: "https://tonyspizza.example",
+      latitude: "39.7", longitude: "-104.9", phone: "555-1234", website: "https://tonyspizza.example",
     });
 
     // The queue entry is gone either way -- re-processing the same id now fails clearly.

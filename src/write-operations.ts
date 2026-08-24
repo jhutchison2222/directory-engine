@@ -5,6 +5,7 @@ import {
   geodirTagsPath,
   resolveAppPasswordConnection,
   resolveSiteConnection,
+  UpstreamError,
   wordpressGet,
   wordpressWrite,
 } from "./inspection";
@@ -523,6 +524,30 @@ async function recordListingSiteLinkResult(
     .run();
 }
 
+const MAX_FAILURE_DETAIL_LENGTH = 500;
+
+// UpstreamError's own .message is just "WordPress returned HTTP <status>" --
+// useful for logs but not for debugging *why* WordPress rejected the
+// request. Surface the actual response body (usually a WP/GeoDirectory
+// error code + message, e.g. rest_missing_callback_param) so a failed
+// publish attempt is actionable from listing_site_links.last_error and the
+// HTTP response alone, without needing to reproduce the call by hand.
+function describePublishFailure(cause: unknown): string {
+  if (cause instanceof UpstreamError) {
+    let detail: string;
+    try {
+      detail = JSON.stringify(cause.detail);
+    } catch {
+      detail = String(cause.detail);
+    }
+    if (detail.length > MAX_FAILURE_DETAIL_LENGTH) {
+      detail = `${detail.slice(0, MAX_FAILURE_DETAIL_LENGTH)}…`;
+    }
+    return `WordPress returned HTTP ${cause.status}: ${detail}`;
+  }
+  return cause instanceof Error ? cause.message : "Publish failed";
+}
+
 export async function processPublishQueueEntry(
   env: Env,
   request: Request,
@@ -582,8 +607,12 @@ export async function processPublishQueueEntry(
       if (listing.city) body.city = listing.city;
       if (listing.region) body.region = listing.region;
       if (listing.country) body.country = listing.country;
-      if (listing.lat !== null) body.latitude = listing.lat;
-      if (listing.lng !== null) body.longitude = listing.lng;
+      // GeoDirectory's geodir/v2/places REST endpoint requires latitude and
+      // longitude as strings, not numbers -- confirmed live (2026-08-24):
+      // sending them as numbers fails with rest_invalid_param /
+      // rest_invalid_type ("latitude is not of type string").
+      if (listing.lat !== null) body.latitude = String(listing.lat);
+      if (listing.lng !== null) body.longitude = String(listing.lng);
       if (listing.phone) body.phone = listing.phone;
       if (listing.website) body.website = listing.website;
 
@@ -617,7 +646,7 @@ export async function processPublishQueueEntry(
       publish_status,
     };
   } catch (cause) {
-    const message = cause instanceof Error ? cause.message : "Publish failed";
+    const message = describePublishFailure(cause);
 
     await recordListingSiteLinkResult(
       env,
