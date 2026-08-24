@@ -1,4 +1,5 @@
 import {
+  geodirCategoriesPath,
   geoPath,
   getDatabaseSchema,
   getDatabaseStatus,
@@ -48,6 +49,7 @@ function capabilities() {
       capabilities: "/v1/capabilities",
       connection_test: "/v1/connection-test",
       test_wp_app_password: "/v1/test/wp-app-password?site=<site_key> (temporary diagnostic -- see inspection.ts)",
+      geodir_places_categories_read: "/v1/geodirectory/places-categories?site_id=<site_key>",
       database: ["/v1/database/status", "/v1/database/schema"],
       sites_read: "/v1/sites",
       wordpress: ROUTES.wordpress.map((name) => `/v1/wordpress/${name}`),
@@ -134,6 +136,18 @@ async function readRoute(request: Request, env: Env, url: URL): Promise<Response
       request,
       env,
       await wordpressGet(connection, geoPath(geodirectory[1]), filterQuery(url.searchParams)),
+    );
+  }
+  // Read counterpart to the geodir-categories write route -- lists a site's
+  // existing places categories. Added so an existing category id can be
+  // looked up (e.g. to re-save it as a Consumer Key/Secret credential check)
+  // without needing that site's own wp-admin.
+  if (url.pathname === "/v1/geodirectory/places-categories") {
+    const connection = await resolveSiteConnection(env, siteId);
+    return jsonResponse(
+      request,
+      env,
+      await wordpressGet(connection, geodirCategoriesPath(), filterQuery(url.searchParams)),
     );
   }
   return jsonResponse(request, env, { error: "Not found" }, { status: 404 });
