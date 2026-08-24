@@ -227,6 +227,15 @@ const WRITE_TOOLS = [
     },
     { readOnlyHint: false, idempotentHint: false },
   ),
+  tool(
+    "process_publish_queue_entry",
+    "Push one queued publish_queue entry to WordPress via that site's geodir/v2/places REST API, using the site's Application Password credential (the GeoDirectory Consumer Key/Secret is only used to look up or auto-create the listing's category). wp_status controls the WordPress post status for new/updated listings (draft/pending/publish; defaults to draft). Records the outcome on listing_site_links and removes the queue entry either way -- there is no retry queue yet, so a failed attempt must be re-enqueued manually. Requires a write key.",
+    {
+      id: { type: "integer", minimum: 1 },
+      wp_status: { type: "string", maxLength: 20 },
+    },
+    { readOnlyHint: false, idempotentHint: false },
+  ),
 ];
 
 export const MCP_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS];
@@ -283,7 +292,7 @@ async function dispatch(message: RpcRequest, request: Request, env: Env, writeAu
       capabilities: { tools: { listChanged: false } },
       serverInfo: { name: "directory-engine-api", version: "0.4.0" },
       instructions:
-        "Inspect WordPress, GeoDirectory, and DIRECTORY_DB using read-only tools (pass site_id to target a specific site; omit it for the legacy default site), or write via upsert_site / upsert_integration_connection / upsert_master_listing / upsert_listing_site_link / enqueue_publish / dequeue_publish / upsert_geodir_category / upsert_geodir_tag / update_geodir_settings (requires X-Directory-Engine-Write-Key). Custom fields have no write endpoint on GeoDirectory's own REST API and still require wp-admin.",
+        "Inspect WordPress, GeoDirectory, and DIRECTORY_DB using read-only tools (pass site_id to target a specific site; omit it for the legacy default site), or write via upsert_site / upsert_integration_connection / upsert_master_listing / upsert_listing_site_link / enqueue_publish / dequeue_publish / upsert_geodir_category / upsert_geodir_tag / update_geodir_settings / process_publish_queue_entry (requires X-Directory-Engine-Write-Key). Custom fields have no write endpoint on GeoDirectory's own REST API and still require wp-admin.",
     });
   }
   if (message.method === "ping") return result(message.id, {});

@@ -24,6 +24,36 @@ interface ConnectionRow {
   status: string;
   secret_reference: string | null;
   configuration_json: string | null;
+  credential_type?: string;
+}
+
+interface MasterListingRow {
+  id: string;
+  name: string;
+  category: string | null;
+  address: string | null;
+  city: string | null;
+  region: string | null;
+  country: string | null;
+  lat: number | null;
+  lng: number | null;
+  phone: string | null;
+  website: string | null;
+}
+
+interface PublishQueueRow {
+  id: number;
+  listing_id: string;
+  site_id: string;
+  action: string;
+}
+
+interface ListingSiteLinkRow {
+  listing_id: string;
+  site_id: string;
+  wp_post_id: number | null;
+  publish_status: string;
+  last_error: string | null;
 }
 
 /**
@@ -34,9 +64,18 @@ interface ConnectionRow {
  * paths added for the multi-site work, on top of the original
  * table_count/schema fixtures every pre-existing test already relied on.
  */
-function fakeDirectoryDb(seed: { sites?: SiteRow[]; connections?: ConnectionRow[] } = {}): D1Database {
+function fakeDirectoryDb(seed: {
+  sites?: SiteRow[];
+  connections?: ConnectionRow[];
+  masterListings?: MasterListingRow[];
+  publishQueue?: PublishQueueRow[];
+  listingSiteLinks?: ListingSiteLinkRow[];
+} = {}): D1Database {
   const sites: SiteRow[] = seed.sites ?? [];
   const connections: ConnectionRow[] = seed.connections ?? [];
+  const masterListings: MasterListingRow[] = seed.masterListings ?? [];
+  const publishQueue: PublishQueueRow[] = seed.publishQueue ?? [];
+  const listingSiteLinks: ListingSiteLinkRow[] = seed.listingSiteLinks ?? [];
 
   function prepare(sql: string) {
     let params: unknown[] = [];
@@ -56,9 +95,28 @@ function fakeDirectoryDb(seed: { sites?: SiteRow[]; connections?: ConnectionRow[
           return (found ? { id: found.id } : null) as T | null;
         }
         if (sql.includes("FROM integration_connections")) {
-          const [siteId] = params as [string];
-          const match = connections.find((c) => c.site_id === siteId && c.provider === "wordpress");
+          const [siteId, credentialType] = params as [string, string | undefined];
+          const wantedType = credentialType ?? "geodir_consumer_key";
+          const match = connections.find(
+            (c) =>
+              c.site_id === siteId &&
+              c.provider === "wordpress" &&
+              (c.credential_type ?? "geodir_consumer_key") === wantedType,
+          );
           return (match ?? null) as T | null;
+        }
+        if (sql.includes("FROM publish_queue")) {
+          const [id] = params as [number];
+          return (publishQueue.find((entry) => entry.id === id) ?? null) as T | null;
+        }
+        if (sql.includes("FROM master_listings")) {
+          const [id] = params as [string];
+          return (masterListings.find((listing) => listing.id === id) ?? null) as T | null;
+        }
+        if (sql.includes("FROM listing_site_links")) {
+          const [listingId, siteId] = params as [string, string];
+          const match = listingSiteLinks.find((link) => link.listing_id === listingId && link.site_id === siteId);
+          return (match ? { wp_post_id: match.wp_post_id } : null) as T | null;
         }
         return { table_count: 21 } as T;
       },
@@ -89,6 +147,17 @@ function fakeDirectoryDb(seed: { sites?: SiteRow[]; connections?: ConnectionRow[
           const index = connections.findIndex((c) => c.id === id);
           if (index >= 0) connections[index] = row;
           else connections.push(row);
+        } else if (sql.includes("INSERT INTO listing_site_links")) {
+          const [listing_id, site_id, wp_post_id, publish_status, last_error] =
+            params as [string, string, number | null, string, string | null];
+          const row: ListingSiteLinkRow = { listing_id, site_id, wp_post_id, publish_status, last_error };
+          const index = listingSiteLinks.findIndex((link) => link.listing_id === listing_id && link.site_id === site_id);
+          if (index >= 0) listingSiteLinks[index] = row;
+          else listingSiteLinks.push(row);
+        } else if (sql.includes("DELETE FROM publish_queue")) {
+          const [id] = params as [number];
+          const index = publishQueue.findIndex((entry) => entry.id === id);
+          if (index >= 0) publishQueue.splice(index, 1);
         }
         // INSERT INTO write_audit_log and every other write in this suite
         // just needs to succeed -- no assertions read it back.
@@ -100,7 +169,16 @@ function fakeDirectoryDb(seed: { sites?: SiteRow[]; connections?: ConnectionRow[
   return { prepare } as unknown as D1Database;
 }
 
-function environment(overrides: Partial<Env> = {}, dbSeed: { sites?: SiteRow[]; connections?: ConnectionRow[] } = {}): Env {
+function environment(
+  overrides: Partial<Env> = {},
+  dbSeed: {
+    sites?: SiteRow[];
+    connections?: ConnectionRow[];
+    masterListings?: MasterListingRow[];
+    publishQueue?: PublishQueueRow[];
+    listingSiteLinks?: ListingSiteLinkRow[];
+  } = {},
+): Env {
   return {
     DIRECTORY_ENGINE_API_KEY: "test-only-key",
     DIRECTORY_ENGINE_WRITE_API_KEY: "test-only-write-key",
@@ -596,6 +674,146 @@ describe("write layer (restored from the live v0.3.0 deploy, plus the new site t
   });
 });
 
+describe("publish queue processor", () => {
+  function withPublishReadyRestaurantsConnection(): Env {
+    const env = environment({}, {
+      sites: [{
+        id: "restaurants", site_key: "restaurants", name: "Restaurants",
+        base_url: "https://restaurants.directory-engine.net", site_role: "niche_template",
+        archetype_id: null, wordpress_site_id: null, status: "staging",
+        timezone: "America/Denver", default_country_code: "US",
+      }],
+      connections: [
+        {
+          id: "restaurants-wordpress", site_id: "restaurants", provider: "wordpress",
+          connection_key: "restaurants-wp-geodirectory", status: "active",
+          secret_reference: "WP_CREDENTIALS_RESTAURANTS", configuration_json: null,
+          credential_type: "geodir_consumer_key",
+        },
+        {
+          id: "restaurants-wordpress-app-password", site_id: "restaurants", provider: "wordpress",
+          connection_key: "restaurants-wp-app-password", status: "active",
+          secret_reference: "WP_APP_PASSWORD_RESTAURANTS", configuration_json: null,
+          credential_type: "wp_application_password",
+        },
+      ],
+      masterListings: [{
+        id: "listing-1", name: "Tony's Pizza", category: "Pizza",
+        address: "123 Main St", city: "Denver", region: "CO", country: "US",
+        lat: 39.7, lng: -104.9, phone: "555-1234", website: "https://tonyspizza.example",
+      }],
+      publishQueue: [{ id: 1, listing_id: "listing-1", site_id: "restaurants", action: "publish" }],
+    });
+    env.WP_CREDENTIALS_RESTAURANTS = JSON.stringify({ consumerKey: "site-key", consumerSecret: "site-secret" });
+    env.WP_APP_PASSWORD_RESTAURANTS = JSON.stringify({ username: "firm777", applicationPassword: "abcd 1234 efgh 5678" });
+    return env;
+  }
+
+  it("publishes a new listing, auto-creating its category with the consumer key, then creates the WP post with the application password", async () => {
+    const env = withPublishReadyRestaurantsConnection();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json([{ id: 7, name: "Tacos" }])) // GET categories -- no "Pizza" match yet
+      .mockResolvedValueOnce(Response.json({ id: 42, name: "Pizza" })) // POST create category
+      .mockResolvedValueOnce(Response.json({ id: 501, title: "Tony's Pizza" })); // POST places
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await route(
+      writeRequest("/v1/write/publish-queue/1/process", { method: "POST", body: "{}" }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(await payload(response)).toMatchObject({
+      id: 1, listing_id: "listing-1", site_id: "restaurants", action: "publish",
+      wp_post_id: 501, publish_status: "published",
+    });
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "https://restaurants.directory-engine.net/wp-json/geodir/v2/places/categories?per_page=100",
+    );
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("authorization")).toBe(
+      `Basic ${btoa("site-key:site-secret")}`,
+    );
+
+    expect(String(fetchMock.mock.calls[1][0])).toBe(
+      "https://restaurants.directory-engine.net/wp-json/geodir/v2/places/categories",
+    );
+    expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ name: "Pizza" });
+
+    expect(String(fetchMock.mock.calls[2][0])).toBe(
+      "https://restaurants.directory-engine.net/wp-json/geodir/v2/places",
+    );
+    expect(fetchMock.mock.calls[2][1]?.method).toBe("POST");
+    expect(new Headers(fetchMock.mock.calls[2][1]?.headers).get("authorization")).toBe(
+      `Basic ${btoa("firm777:abcd 1234 efgh 5678")}`,
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toMatchObject({
+      title: "Tony's Pizza", status: "draft", post_category: [42],
+      street: "123 Main St", city: "Denver", region: "CO", country: "US",
+      latitude: 39.7, longitude: -104.9, phone: "555-1234", website: "https://tonyspizza.example",
+    });
+
+    // The queue entry is gone either way -- re-processing the same id now fails clearly.
+    const reprocessed = await route(
+      writeRequest("/v1/write/publish-queue/1/process", { method: "POST", body: "{}" }),
+      env,
+    );
+    expect(reprocessed.status).toBe(400);
+    expect(await payload(reprocessed)).toEqual({ error: "Unknown publish_queue id: 1" });
+  });
+
+  it("records a failed listing_site_links row and removes the queue entry when no application password is registered", async () => {
+    const env = environment({}, {
+      sites: [{
+        id: "restaurants", site_key: "restaurants", name: "Restaurants",
+        base_url: "https://restaurants.directory-engine.net", site_role: "niche_template",
+        archetype_id: null, wordpress_site_id: null, status: "staging",
+        timezone: "America/Denver", default_country_code: "US",
+      }],
+      connections: [],
+      masterListings: [{
+        id: "listing-2", name: "Sunset Diner", category: "Diner",
+        address: null, city: null, region: null, country: null,
+        lat: null, lng: null, phone: null, website: null,
+      }],
+      publishQueue: [{ id: 2, listing_id: "listing-2", site_id: "restaurants", action: "publish" }],
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await route(
+      writeRequest("/v1/write/publish-queue/2/process", { method: "POST", body: "{}" }),
+      env,
+    );
+    expect(response.status).toBe(500);
+    expect(await payload(response)).toEqual({
+      error: "Publish failed for queue id 2, site restaurants: No active wp_application_password credential registered for site restaurants",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // Failed attempts are removed from the queue too -- there is no retry queue yet.
+    const reprocessed = await route(
+      writeRequest("/v1/write/publish-queue/2/process", { method: "POST", body: "{}" }),
+      env,
+    );
+    expect(reprocessed.status).toBe(400);
+    expect(await payload(reprocessed)).toEqual({ error: "Unknown publish_queue id: 2" });
+  });
+
+  it("rejects an invalid wp_status", async () => {
+    const env = withPublishReadyRestaurantsConnection();
+    const response = await route(
+      writeRequest("/v1/write/publish-queue/1/process", {
+        method: "POST",
+        body: JSON.stringify({ wp_status: "archived" }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+  });
+});
+
 describe("MCP contract", () => {
   const call = (method: string, params?: unknown) => route(request("/mcp", {
     method: "POST",
@@ -625,12 +843,12 @@ describe("MCP contract", () => {
       "list_wordpress_categories",
       "upsert_site_profile", "upsert_site", "upsert_integration_connection", "upsert_master_listing",
       "upsert_listing_site_link", "enqueue_publish", "dequeue_publish",
-      "upsert_geodir_category", "upsert_geodir_tag", "update_geodir_settings",
+      "upsert_geodir_category", "upsert_geodir_tag", "update_geodir_settings", "process_publish_queue_entry",
     ]);
     const writeNames = new Set([
       "upsert_site_profile", "upsert_site", "upsert_integration_connection", "upsert_master_listing",
       "upsert_listing_site_link", "enqueue_publish", "dequeue_publish",
-      "upsert_geodir_category", "upsert_geodir_tag", "update_geodir_settings",
+      "upsert_geodir_category", "upsert_geodir_tag", "update_geodir_settings", "process_publish_queue_entry",
     ]);
     for (const toolDef of MCP_TOOLS) {
       if (writeNames.has(toolDef.name)) {

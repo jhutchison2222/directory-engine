@@ -1,8 +1,11 @@
 import {
   geodirCategoriesPath,
+  geodirPlacesPath,
   geodirSettingsPath,
   geodirTagsPath,
+  resolveAppPasswordConnection,
   resolveSiteConnection,
+  wordpressGet,
   wordpressWrite,
 } from "./inspection";
 import type { Env } from "./types";
@@ -76,6 +79,11 @@ const CREDENTIAL_TYPES = new Set(["geodir_consumer_key", "wp_application_passwor
 const MASTER_LISTING_STATUSES = new Set(["pending_review", "approved", "rejected", "archived"]);
 const PUBLISH_STATUSES = new Set(["queued", "published", "failed", "unpublished"]);
 const PUBLISH_ACTIONS = new Set(["publish", "update", "unpublish"]);
+// WordPress post status to create/update the listing as. Defaults to "draft"
+// -- see worker-multisite-scoping.md's publish-queue processor section for
+// why: the first real run is a small manual test batch the user reviews in
+// wp-admin before anything goes fully live/public via "publish".
+const WP_LISTING_STATUSES = new Set(["draft", "pending", "publish"]);
 
 export async function parseJsonBody(request: Request): Promise<Record<string, unknown>> {
   if (!request.headers.get("content-type")?.toLowerCase().includes("application/json")) {
@@ -414,6 +422,225 @@ export async function dequeuePublish(env: Env, request: Request, id: number) {
   return { id, dequeued: true };
 }
 
+// The publish-queue processor -- the piece flagged as "the one real
+// remaining blocker" in architecture-overview.md. Pops one publish_queue
+// entry, pushes it to that site's WordPress via geodir/v2/places (using the
+// Application Password credential -- the Consumer Key/Secret is only used
+// here for the category lookup/creation step), records the result on
+// listing_site_links, and removes the queue entry either way (this queue has
+// no retry/backoff concept yet -- a failed attempt is recorded as `failed` on
+// listing_site_links with last_error set, and can be manually re-enqueued).
+//
+// Note: does NOT check master_listings.status (e.g. requiring "approved")
+// before publishing -- no approval workflow exists yet, so gating on it would
+// make this unusable. It's the caller's responsibility to only enqueue
+// listings that are actually meant to go out.
+
+interface MasterListingRow {
+  id: string;
+  name: string;
+  category: string | null;
+  address: string | null;
+  city: string | null;
+  region: string | null;
+  country: string | null;
+  lat: number | null;
+  lng: number | null;
+  phone: string | null;
+  website: string | null;
+}
+
+interface PublishQueueRow {
+  id: number;
+  listing_id: string;
+  site_id: string;
+  action: string;
+}
+
+interface GeodirCategorySummary {
+  id?: unknown;
+  name?: unknown;
+}
+
+// Looks up an existing GeoDirectory category by exact (case-insensitive)
+// name on the target site, creating it if no match exists -- the "auto-
+// create" behavior chosen 2026-08-24 over filing everything under
+// Uncategorized. Fetches the site's full category list (per_page=100, a
+// niche's category tree is small) rather than relying on an unconfirmed
+// `search` query param, and filters for an exact match client-side.
+async function resolveOrCreateCategory(
+  env: Env,
+  request: Request,
+  site_id: string,
+  rawCategoryName: string,
+): Promise<number> {
+  const name = rawCategoryName.trim() || "Uncategorized";
+  const connection = await resolveSiteConnection(env, site_id);
+
+  const existing = await wordpressGet(
+    connection,
+    geodirCategoriesPath(),
+    new URLSearchParams({ per_page: "100" }),
+  );
+  const list = Array.isArray(existing) ? (existing as GeodirCategorySummary[]) : [];
+  const match = list.find(
+    (item) => typeof item.name === "string" && item.name.toLowerCase() === name.toLowerCase(),
+  );
+  if (match && typeof match.id === "number") return match.id;
+
+  const created = (await wordpressWrite(connection, geodirCategoriesPath(), "POST", { name })) as {
+    id?: unknown;
+  };
+  if (typeof created.id !== "number") {
+    throw new Error(`Category creation for "${name}" on site ${site_id} did not return a numeric id`);
+  }
+
+  await logAudit(env, {
+    action: "auto_create_geodir_category",
+    site_id,
+    actor: actorFrom(request),
+    detail: { name, id: created.id },
+  });
+  return created.id;
+}
+
+async function recordListingSiteLinkResult(
+  env: Env,
+  listing_id: string,
+  site_id: string,
+  wp_post_id: number | null,
+  publish_status: string,
+  last_error: string | null,
+): Promise<void> {
+  await env.DIRECTORY_DB.prepare(
+    `INSERT INTO listing_site_links (listing_id, site_id, wp_post_id, publish_status, last_attempt_at, last_error)
+     VALUES (?, ?, ?, ?, datetime('now'), ?)
+     ON CONFLICT(listing_id, site_id) DO UPDATE SET
+       wp_post_id = excluded.wp_post_id, publish_status = excluded.publish_status,
+       last_attempt_at = datetime('now'), last_error = excluded.last_error`,
+  )
+    .bind(listing_id, site_id, wp_post_id, publish_status, last_error)
+    .run();
+}
+
+export async function processPublishQueueEntry(
+  env: Env,
+  request: Request,
+  queueId: number,
+  options: { wpStatus?: string } = {},
+) {
+  const wpStatus = options.wpStatus ?? "draft";
+  if (!WP_LISTING_STATUSES.has(wpStatus)) {
+    throw new ValidationError(`wp_status must be one of ${[...WP_LISTING_STATUSES].join(", ")}`);
+  }
+
+  const queueEntry = await env.DIRECTORY_DB.prepare(
+    `SELECT id, listing_id, site_id, action FROM publish_queue WHERE id = ?`,
+  )
+    .bind(queueId)
+    .first<PublishQueueRow>();
+  if (!queueEntry) throw new ValidationError(`Unknown publish_queue id: ${queueId}`);
+  if (!PUBLISH_ACTIONS.has(queueEntry.action)) {
+    throw new ValidationError(`publish_queue id ${queueId} has an unrecognized action: ${queueEntry.action}`);
+  }
+
+  const listing = await env.DIRECTORY_DB.prepare(
+    `SELECT id, name, category, address, city, region, country, lat, lng, phone, website
+       FROM master_listings WHERE id = ?`,
+  )
+    .bind(queueEntry.listing_id)
+    .first<MasterListingRow>();
+  if (!listing) throw new ValidationError(`Unknown listing_id: ${queueEntry.listing_id}`);
+
+  const existingLink = await env.DIRECTORY_DB.prepare(
+    `SELECT wp_post_id FROM listing_site_links WHERE listing_id = ? AND site_id = ?`,
+  )
+    .bind(queueEntry.listing_id, queueEntry.site_id)
+    .first<{ wp_post_id: number | null }>();
+
+  try {
+    const appConnection = await resolveAppPasswordConnection(env, queueEntry.site_id);
+    if (!appConnection.username || !appConnection.applicationPassword) {
+      throw new Error(`No active wp_application_password credential registered for site ${queueEntry.site_id}`);
+    }
+
+    let wpPostId: number | null = existingLink?.wp_post_id ?? null;
+
+    if (queueEntry.action === "unpublish") {
+      if (!wpPostId) {
+        throw new Error(`No wp_post_id on file for site ${queueEntry.site_id} -- nothing to unpublish`);
+      }
+      await wordpressWrite(appConnection, geodirPlacesPath(wpPostId), "PUT", { status: "trash" });
+    } else {
+      const categoryId = await resolveOrCreateCategory(env, request, queueEntry.site_id, listing.category ?? "");
+      const body: Record<string, unknown> = {
+        title: listing.name,
+        status: wpStatus,
+        post_category: [categoryId],
+      };
+      if (listing.address) body.street = listing.address;
+      if (listing.city) body.city = listing.city;
+      if (listing.region) body.region = listing.region;
+      if (listing.country) body.country = listing.country;
+      if (listing.lat !== null) body.latitude = listing.lat;
+      if (listing.lng !== null) body.longitude = listing.lng;
+      if (listing.phone) body.phone = listing.phone;
+      if (listing.website) body.website = listing.website;
+
+      const upstream =
+        queueEntry.action === "update" && wpPostId
+          ? await wordpressWrite(appConnection, geodirPlacesPath(wpPostId), "PUT", body)
+          : await wordpressWrite(appConnection, geodirPlacesPath(), "POST", body);
+
+      const created = upstream as { id?: unknown };
+      if (typeof created.id === "number") wpPostId = created.id;
+    }
+
+    const publish_status = queueEntry.action === "unpublish" ? "unpublished" : "published";
+    await recordListingSiteLinkResult(env, queueEntry.listing_id, queueEntry.site_id, wpPostId, publish_status, null);
+    await env.DIRECTORY_DB.prepare(`DELETE FROM publish_queue WHERE id = ?`).bind(queueId).run();
+
+    await logAudit(env, {
+      action: "process_publish_queue_entry",
+      site_id: queueEntry.site_id,
+      listing_id: queueEntry.listing_id,
+      actor: actorFrom(request),
+      detail: { queue_id: queueId, queued_action: queueEntry.action, wp_post_id: wpPostId, result: "success" },
+    });
+
+    return {
+      id: queueId,
+      listing_id: queueEntry.listing_id,
+      site_id: queueEntry.site_id,
+      action: queueEntry.action,
+      wp_post_id: wpPostId,
+      publish_status,
+    };
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : "Publish failed";
+
+    await recordListingSiteLinkResult(
+      env,
+      queueEntry.listing_id,
+      queueEntry.site_id,
+      existingLink?.wp_post_id ?? null,
+      "failed",
+      message,
+    );
+    await env.DIRECTORY_DB.prepare(`DELETE FROM publish_queue WHERE id = ?`).bind(queueId).run();
+
+    await logAudit(env, {
+      action: "process_publish_queue_entry",
+      site_id: queueEntry.site_id,
+      listing_id: queueEntry.listing_id,
+      actor: actorFrom(request),
+      detail: { queue_id: queueId, queued_action: queueEntry.action, result: "failed", error: message },
+    });
+
+    throw new Error(`Publish failed for queue id ${queueId}, site ${queueEntry.site_id}: ${message}`);
+  }
+}
+
 // The three functions below proxy through to GeoDirectory's own geodir/v2
 // REST API on the target site, rather than through master_listings/D1 --
 // they configure the site itself (categories, tags, settings), not listing
@@ -530,6 +757,14 @@ export async function runWriteOperation(
       return upsertGeodirTag(env, request, args);
     case "update_geodir_settings":
       return updateGeodirSettings(env, request, args);
+    case "process_publish_queue_entry": {
+      const id = args.id;
+      if (typeof id !== "number" || !Number.isInteger(id)) throw new ValidationError("id must be an integer");
+      const wpStatus = args.wp_status;
+      return processPublishQueueEntry(env, request, id, {
+        wpStatus: typeof wpStatus === "string" ? wpStatus : undefined,
+      });
+    }
     default:
       throw new Error("Unknown write operation");
   }

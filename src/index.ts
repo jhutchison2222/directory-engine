@@ -22,6 +22,7 @@ import {
   enqueuePublish,
   listPublishQueue,
   parseJsonBody,
+  processPublishQueueEntry,
   safeWriteError,
   updateGeodirSettings,
   upsertGeodirCategory,
@@ -63,6 +64,7 @@ function capabilities() {
         listing_site_links: "POST /v1/write/listing-site-links",
         publish_queue_enqueue: "POST /v1/write/publish-queue",
         publish_queue_dequeue: "DELETE /v1/write/publish-queue/:id",
+        publish_queue_process: "POST /v1/write/publish-queue/:id/process (body: {wp_status?: 'draft'|'pending'|'publish'}, defaults to draft)",
         geodir_categories: "POST /v1/write/geodir-categories (or PUT .../:id to update)",
         geodir_tags: "POST /v1/write/geodir-tags (or PUT .../:id to update)",
         geodir_settings: "PUT /v1/write/geodir-settings/:group_id",
@@ -75,6 +77,7 @@ function capabilities() {
       "Omitting site_id falls back to the legacy WORDPRESS_BASE_URL/GEODIRECTORY_CONSUMER_KEY/SECRET env vars, unchanged from v0.2.0/v0.3.0.",
       "geodir-categories/geodir-tags/geodir-settings proxy directly to each site's own geodir/v2 REST API -- they configure the site (categories, tags, settings), not master_listings.",
       "GeoDirectory custom fields have no write endpoint on geodir/v2 -- field creation still requires that site's own wp-admin.",
+      "publish-queue/:id/process pushes one queued listing to WordPress via geodir/v2/places, using that site's Application Password credential (not the GeoDirectory Consumer Key/Secret, which is only used to look up/auto-create the listing's category). Defaults new listings to wp_status=draft; the queue entry is removed either way, with the result recorded on listing_site_links.",
     ],
   };
 }
@@ -186,6 +189,19 @@ async function writeRoute(request: Request, env: Env, url: URL): Promise<Respons
   if (dequeueMatch) {
     if (request.method !== "DELETE") return methodNotAllowed(request, env, "DELETE, OPTIONS");
     return jsonResponse(request, env, await dequeuePublish(env, request, Number(dequeueMatch[1])));
+  }
+  const processMatch = url.pathname.match(/^\/v1\/write\/publish-queue\/(\d+)\/process$/);
+  if (processMatch) {
+    if (request.method !== "POST") return methodNotAllowed(request, env, "POST, OPTIONS");
+    const body = await parseJsonBody(request);
+    const wpStatus = body.wp_status;
+    return jsonResponse(
+      request,
+      env,
+      await processPublishQueueEntry(env, request, Number(processMatch[1]), {
+        wpStatus: typeof wpStatus === "string" ? wpStatus : undefined,
+      }),
+    );
   }
 
   const geodirCategoryMatch = url.pathname.match(/^\/v1\/write\/geodir-categories(?:\/(\d+))?$/);

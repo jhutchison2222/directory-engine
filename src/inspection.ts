@@ -27,6 +27,11 @@ export interface SiteConnection {
   baseUrl: URL;
   consumerKey?: string;
   consumerSecret?: string;
+  // Application Password fields (added 2026-08-24 for the publish-queue
+  // processor) -- a SiteConnection carries whichever credential pair it was
+  // resolved with; wordpressHeaders() picks whichever pair is present.
+  username?: string;
+  applicationPassword?: string;
 }
 
 interface SiteRow {
@@ -186,6 +191,11 @@ function wordpressHeaders(connection: SiteConnection): Headers {
       "authorization",
       `Basic ${btoa(`${connection.consumerKey}:${connection.consumerSecret}`)}`,
     );
+  } else if (connection.username && connection.applicationPassword) {
+    headers.set(
+      "authorization",
+      `Basic ${btoa(`${connection.username}:${connection.applicationPassword}`)}`,
+    );
   }
   return headers;
 }
@@ -298,6 +308,16 @@ export function geodirTagsPath(id?: number): string {
 
 export function geodirSettingsPath(groupId: string): string {
   return `wp-json/geodir/v2/settings/${encodeURIComponent(groupId)}`;
+}
+
+// Places (listings) path -- used by the publish-queue processor. Confirmed
+// live during full-fleet publish verification (2026-08-22): POST creates a
+// listing, PUT updates one (including status changes, e.g. to "trash" to
+// unpublish), authenticated with a site's WordPress Application Password
+// rather than its GeoDirectory Consumer Key/Secret -- see
+// worker-multisite-scoping.md's "Publish-queue processor" section.
+export function geodirPlacesPath(id?: number): string {
+  return id ? `wp-json/geodir/v2/places/${id}` : "wp-json/geodir/v2/places";
 }
 
 export async function getDatabaseStatus(env: Env) {
