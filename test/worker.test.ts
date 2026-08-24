@@ -54,6 +54,7 @@ interface ListingSiteLinkRow {
   wp_post_id: number | null;
   publish_status: string;
   last_error: string | null;
+  locked?: number;
 }
 
 /**
@@ -114,9 +115,16 @@ function fakeDirectoryDb(seed: {
           return (masterListings.find((listing) => listing.id === id) ?? null) as T | null;
         }
         if (sql.includes("FROM listing_site_links")) {
+          // handleListingWebhook's lookup-by-wp_post_id: WHERE site_id = ? AND wp_post_id = ?
+          // (distinct param order/shape from the listing_id + site_id lookup below).
+          if (sql.includes("WHERE site_id = ? AND wp_post_id = ?")) {
+            const [siteId, wpPostId] = params as [string, number];
+            const match = listingSiteLinks.find((link) => link.site_id === siteId && link.wp_post_id === wpPostId);
+            return (match ? { listing_id: match.listing_id } : null) as T | null;
+          }
           const [listingId, siteId] = params as [string, string];
           const match = listingSiteLinks.find((link) => link.listing_id === listingId && link.site_id === siteId);
-          return (match ? { wp_post_id: match.wp_post_id } : null) as T | null;
+          return (match ? { wp_post_id: match.wp_post_id, locked: match.locked ?? 0 } : null) as T | null;
         }
         return { table_count: 21 } as T;
       },
@@ -148,12 +156,35 @@ function fakeDirectoryDb(seed: {
           if (index >= 0) connections[index] = row;
           else connections.push(row);
         } else if (sql.includes("INSERT INTO listing_site_links")) {
-          const [listing_id, site_id, wp_post_id, publish_status, last_error] =
-            params as [string, string, number | null, string, string | null];
-          const row: ListingSiteLinkRow = { listing_id, site_id, wp_post_id, publish_status, last_error };
+          if (sql.includes("locked")) {
+            // handleListingWebhook's owner-created-listing insert: publish_status
+            // and locked are literals in the SQL, not bound params.
+            const [listing_id, site_id, wp_post_id] = params as [string, string, number];
+            const row: ListingSiteLinkRow = {
+              listing_id, site_id, wp_post_id, publish_status: "published", last_error: null, locked: 1,
+            };
+            const index = listingSiteLinks.findIndex((link) => link.listing_id === listing_id && link.site_id === site_id);
+            if (index >= 0) listingSiteLinks[index] = row;
+            else listingSiteLinks.push(row);
+          } else {
+            const [listing_id, site_id, wp_post_id, publish_status, last_error] =
+              params as [string, string, number | null, string, string | null];
+            const index = listingSiteLinks.findIndex((link) => link.listing_id === listing_id && link.site_id === site_id);
+            const row: ListingSiteLinkRow = {
+              listing_id, site_id, wp_post_id, publish_status, last_error,
+              locked: index >= 0 ? listingSiteLinks[index].locked : 0,
+            };
+            if (index >= 0) listingSiteLinks[index] = row;
+            else listingSiteLinks.push(row);
+          }
+        } else if (sql.includes("UPDATE listing_site_links SET locked")) {
+          const [listing_id, site_id] = params as [string, string];
           const index = listingSiteLinks.findIndex((link) => link.listing_id === listing_id && link.site_id === site_id);
-          if (index >= 0) listingSiteLinks[index] = row;
-          else listingSiteLinks.push(row);
+          if (index >= 0) listingSiteLinks[index] = { ...listingSiteLinks[index], locked: 1 };
+        } else if (sql.includes("INSERT INTO master_listings") && sql.includes("'owner_created'")) {
+          const [id, source_id, name, category, address, city, region, country, lat, lng, phone, website] =
+            params as [string, string, string, string | null, string | null, string | null, string | null, string | null, number | null, number | null, string | null, string | null];
+          masterListings.push({ id, name, category, address, city, region, country, lat, lng, phone, website });
         } else if (sql.includes("DELETE FROM publish_queue")) {
           const [id] = params as [number];
           const index = publishQueue.findIndex((entry) => entry.id === id);
@@ -182,6 +213,7 @@ function environment(
   return {
     DIRECTORY_ENGINE_API_KEY: "test-only-key",
     DIRECTORY_ENGINE_WRITE_API_KEY: "test-only-write-key",
+    WORDPRESS_WEBHOOK_SECRET: "test-only-webhook-secret",
     WORDPRESS_BASE_URL: "https://wordpress.test",
     GEODIRECTORY_CONSUMER_KEY: "consumer-key",
     GEODIRECTORY_CONSUMER_SECRET: "consumer-secret",
@@ -201,6 +233,16 @@ function writeRequest(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   headers.set("x-directory-engine-key", "test-only-key");
   headers.set("x-directory-engine-write-key", "test-only-write-key");
+  headers.set("content-type", "application/json");
+  return new Request(`https://worker.test${path}`, { ...init, headers });
+}
+
+// The webhook route is deliberately NOT gated by x-directory-engine-key --
+// see security.ts's isWebhookAuthorized() -- so this helper only sets the
+// webhook secret, not the read key.
+function webhookRequest(path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set("x-directory-engine-webhook-secret", "test-only-webhook-secret");
   headers.set("content-type", "application/json");
   return new Request(`https://worker.test${path}`, { ...init, headers });
 }
@@ -675,7 +717,7 @@ describe("write layer (restored from the live v0.3.0 deploy, plus the new site t
 });
 
 describe("publish queue processor", () => {
-  function withPublishReadyRestaurantsConnection(): Env {
+  function withPublishReadyRestaurantsConnection(listingSiteLinks: ListingSiteLinkRow[] = []): Env {
     const env = environment({}, {
       sites: [{
         id: "restaurants", site_key: "restaurants", name: "Restaurants",
@@ -703,6 +745,7 @@ describe("publish queue processor", () => {
         lat: 39.7, lng: -104.9, phone: "555-1234", website: "https://tonyspizza.example",
       }],
       publishQueue: [{ id: 1, listing_id: "listing-1", site_id: "restaurants", action: "publish" }],
+      listingSiteLinks,
     });
     env.WP_CREDENTIALS_RESTAURANTS = JSON.stringify({ consumerKey: "site-key", consumerSecret: "site-secret" });
     env.WP_APP_PASSWORD_RESTAURANTS = JSON.stringify({ username: "firm777", applicationPassword: "abcd 1234 efgh 5678" });
@@ -811,6 +854,124 @@ describe("publish queue processor", () => {
       env,
     );
     expect(response.status).toBe(400);
+  });
+
+  it("skips a locked (owner-managed) listing without writing to WordPress, but still clears the queue entry", async () => {
+    const env = withPublishReadyRestaurantsConnection([
+      { listing_id: "listing-1", site_id: "restaurants", wp_post_id: 501, publish_status: "published", last_error: null, locked: 1 },
+    ]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await route(
+      writeRequest("/v1/write/publish-queue/1/process", { method: "POST", body: "{}" }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(await payload(response)).toMatchObject({
+      id: 1, listing_id: "listing-1", site_id: "restaurants", action: "publish", skipped: true,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // The queue entry is gone even though the write was skipped.
+    const reprocessed = await route(
+      writeRequest("/v1/write/publish-queue/1/process", { method: "POST", body: "{}" }),
+      env,
+    );
+    expect(reprocessed.status).toBe(400);
+  });
+});
+
+describe("listing webhook (owner-edit safeguard)", () => {
+  function withRestaurantsSite(listingSiteLinks: ListingSiteLinkRow[] = []): Env {
+    return environment({}, {
+      sites: [{
+        id: "restaurants", site_key: "restaurants", name: "Restaurants",
+        base_url: "https://restaurants.directory-engine.net", site_role: "niche_template",
+        archetype_id: null, wordpress_site_id: null, status: "staging",
+        timezone: "America/Denver", default_country_code: "US",
+      }],
+      listingSiteLinks,
+    });
+  }
+
+  it("rejects a call without the webhook secret, even with a valid read/write key", async () => {
+    const env = withRestaurantsSite();
+    const response = await route(
+      writeRequest("/v1/webhook/listing-changed", {
+        method: "POST",
+        body: JSON.stringify({ site_id: "restaurants", wp_post_id: 501 }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(401);
+  });
+
+  it("locks an existing tracked listing when its wp_post_id is already known", async () => {
+    const env = withRestaurantsSite([
+      { listing_id: "listing-1", site_id: "restaurants", wp_post_id: 501, publish_status: "published", last_error: null, locked: 0 },
+    ]);
+    const response = await route(
+      webhookRequest("/v1/webhook/listing-changed", {
+        method: "POST",
+        body: JSON.stringify({ site_id: "restaurants", wp_post_id: 501, title: "Tony's Pizza (owner edit)" }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(await payload(response)).toEqual({
+      listing_id: "listing-1", site_id: "restaurants", wp_post_id: 501, locked: true, created_new: false,
+    });
+
+    // The underlying link is now locked -- processPublishQueueEntry's own
+    // locked-skip behavior against this exact row is covered separately
+    // above ("skips a locked (owner-managed) listing...").
+    const relocked = await env.DIRECTORY_DB.prepare(
+      "SELECT wp_post_id, locked FROM listing_site_links WHERE listing_id = ? AND site_id = ?",
+    ).bind("listing-1", "restaurants").first<{ locked: number }>();
+    expect(relocked?.locked).toBe(1);
+  });
+
+  it("creates a new owner-managed master_listings row and a pre-locked link when wp_post_id is unknown", async () => {
+    const env = withRestaurantsSite();
+    const response = await route(
+      webhookRequest("/v1/webhook/listing-changed", {
+        method: "POST",
+        body: JSON.stringify({
+          site_id: "restaurants", wp_post_id: 999, title: "Maria's Tacos",
+          category: "Tacos", city: "Denver", region: "CO", country: "US",
+          lat: 39.71, lng: -104.95, phone: "555-9999",
+        }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    const body = await payload(response);
+    expect(body).toMatchObject({ site_id: "restaurants", wp_post_id: 999, locked: true, created_new: true });
+    expect(typeof body.listing_id).toBe("string");
+
+    const link = await env.DIRECTORY_DB.prepare(
+      "SELECT wp_post_id, locked FROM listing_site_links WHERE listing_id = ? AND site_id = ?",
+    ).bind(body.listing_id, "restaurants").first<{ wp_post_id: number; locked: number }>();
+    expect(link).toMatchObject({ wp_post_id: 999, locked: 1 });
+  });
+
+  it("rejects a webhook call missing wp_post_id or with an unknown site_id", async () => {
+    const env = withRestaurantsSite();
+    const missingPostId = await route(
+      webhookRequest("/v1/webhook/listing-changed", { method: "POST", body: JSON.stringify({ site_id: "restaurants" }) }),
+      env,
+    );
+    expect(missingPostId.status).toBe(400);
+
+    const unknownSite = await route(
+      webhookRequest("/v1/webhook/listing-changed", {
+        method: "POST",
+        body: JSON.stringify({ site_id: "does-not-exist", wp_post_id: 1 }),
+      }),
+      env,
+    );
+    expect(unknownSite.status).toBe(400);
   });
 });
 

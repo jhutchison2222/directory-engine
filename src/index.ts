@@ -15,11 +15,12 @@ import {
 } from "./inspection";
 import { handleMcp, MCP_TOOLS } from "./mcp";
 import { filterQuery } from "./operations";
-import { corsHeaders, isAuthorized, isWriteAuthorized, jsonResponse } from "./security";
+import { corsHeaders, isAuthorized, isWebhookAuthorized, isWriteAuthorized, jsonResponse } from "./security";
 import type { Env } from "./types";
 import {
   dequeuePublish,
   enqueuePublish,
+  handleListingWebhook,
   listPublishQueue,
   parseJsonBody,
   processPublishQueueEntry,
@@ -70,6 +71,10 @@ function capabilities() {
         geodir_settings: "PUT /v1/write/geodir-settings/:group_id",
       },
       mcp: "/mcp",
+      webhook: {
+        listing_changed:
+          "POST /v1/webhook/listing-changed (header: X-Directory-Engine-Webhook-Secret: <WORDPRESS_WEBHOOK_SECRET>) -- called by a WordPress site itself, not the write API. Locks the listing_site_links row so future publish-queue runs skip it, or creates a new owner_managed master_listings row if the wp_post_id wasn't already tracked.",
+      },
     },
     mcp_tools: MCP_TOOLS.map(({ name }) => name),
     notes: [
@@ -78,6 +83,7 @@ function capabilities() {
       "geodir-categories/geodir-tags/geodir-settings proxy directly to each site's own geodir/v2 REST API -- they configure the site (categories, tags, settings), not master_listings.",
       "GeoDirectory custom fields have no write endpoint on geodir/v2 -- field creation still requires that site's own wp-admin.",
       "publish-queue/:id/process pushes one queued listing to WordPress via geodir/v2/places, using that site's Application Password credential (not the GeoDirectory Consumer Key/Secret, which is only used to look up/auto-create the listing's category). Defaults new listings to wp_status=draft; the queue entry is removed either way, with the result recorded on listing_site_links.",
+      "listing_site_links.locked=1 (set via the webhook, or directly) makes publish-queue/:id/process skip that listing entirely (no WordPress write, no wp_post_id change) so owner edits are never clobbered by a re-publish.",
     ],
   };
 }
@@ -240,6 +246,23 @@ export async function route(request: Request, env: Env): Promise<Response> {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(request, env) });
   if (url.pathname === "/health" && request.method === "GET") {
     return jsonResponse(request, env, { status: "ok", service: "directory-engine-api", version: VERSION });
+  }
+  // Called by a small snippet on each WordPress site, not by the user's own
+  // scripts -- gated by its own secret (WORDPRESS_WEBHOOK_SECRET) instead of
+  // the read/write API keys. See security.ts's isWebhookAuthorized() and
+  // write-operations.ts's handleListingWebhook().
+  if (url.pathname === "/v1/webhook/listing-changed") {
+    if (request.method !== "POST") return methodNotAllowed(request, env, "POST, OPTIONS");
+    if (!isWebhookAuthorized(request, env)) {
+      return jsonResponse(request, env, { error: "Unauthorized" }, { status: 401 });
+    }
+    try {
+      return jsonResponse(request, env, await handleListingWebhook(env, request, await parseJsonBody(request)));
+    } catch (cause) {
+      console.error("webhook request failed", safeWriteError(cause));
+      const status = cause instanceof ValidationError ? 400 : 500;
+      return jsonResponse(request, env, { error: safeWriteError(cause) }, { status });
+    }
   }
   if (!isAuthorized(request, env)) {
     return jsonResponse(request, env, { error: "Unauthorized" }, { status: 401 });

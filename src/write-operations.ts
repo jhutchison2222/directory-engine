@@ -77,7 +77,11 @@ const CONNECTION_STATUSES = new Set(["inactive", "active", "error"]);
 // geodir_consumer_key is the original/default type, kept as the fallback so
 // existing callers that don't pass credential_type behave exactly as before.
 const CREDENTIAL_TYPES = new Set(["geodir_consumer_key", "wp_application_password"]);
-const MASTER_LISTING_STATUSES = new Set(["pending_review", "approved", "rejected", "archived"]);
+// "owner_managed" (added 2026-08-24) marks a listing that originated from a
+// business owner creating it directly on a WordPress site -- see
+// handleListingWebhook() and worker-multisite-scoping.md's "Protecting
+// owner-edited listings" section.
+const MASTER_LISTING_STATUSES = new Set(["pending_review", "approved", "rejected", "archived", "owner_managed"]);
 const PUBLISH_STATUSES = new Set(["queued", "published", "failed", "unpublished"]);
 const PUBLISH_ACTIONS = new Set(["publish", "update", "unpublish"]);
 // WordPress post status to create/update the listing as. Defaults to "draft"
@@ -487,12 +491,14 @@ async function resolveOrCreateCategory(
   const match = list.find(
     (item) => typeof item.name === "string" && item.name.toLowerCase() === name.toLowerCase(),
   );
-  if (match && typeof match.id === "number") return match.id;
+  const matchId = match ? parseNumericId(match.id) : null;
+  if (matchId !== null) return matchId;
 
   const created = (await wordpressWrite(connection, geodirCategoriesPath(), "POST", { name })) as {
     id?: unknown;
   };
-  if (typeof created.id !== "number") {
+  const createdId = parseNumericId(created.id);
+  if (createdId === null) {
     throw new Error(`Category creation for "${name}" on site ${site_id} did not return a numeric id`);
   }
 
@@ -500,9 +506,9 @@ async function resolveOrCreateCategory(
     action: "auto_create_geodir_category",
     site_id,
     actor: actorFrom(request),
-    detail: { name, id: created.id },
+    detail: { name, id: createdId },
   });
-  return created.id;
+  return createdId;
 }
 
 async function recordListingSiteLinkResult(
@@ -522,6 +528,17 @@ async function recordListingSiteLinkResult(
   )
     .bind(listing_id, site_id, wp_post_id, publish_status, last_error)
     .run();
+}
+
+// GeoDirectory's geodir/v2 API is inconsistent about numeric typing in its
+// own responses (confirmed 2026-08-24: it requires latitude/longitude as
+// strings on write, unlike a typical WP REST response) -- so treat a
+// returned "id" that's a numeric string the same as a real number, rather
+// than assuming every endpoint returns it the same way categories do.
+function parseNumericId(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
+  return null;
 }
 
 const MAX_FAILURE_DETAIL_LENGTH = 500;
@@ -578,10 +595,36 @@ export async function processPublishQueueEntry(
   if (!listing) throw new ValidationError(`Unknown listing_id: ${queueEntry.listing_id}`);
 
   const existingLink = await env.DIRECTORY_DB.prepare(
-    `SELECT wp_post_id FROM listing_site_links WHERE listing_id = ? AND site_id = ?`,
+    `SELECT wp_post_id, locked FROM listing_site_links WHERE listing_id = ? AND site_id = ?`,
   )
     .bind(queueEntry.listing_id, queueEntry.site_id)
-    .first<{ wp_post_id: number | null }>();
+    .first<{ wp_post_id: number | null; locked: number }>();
+
+  // A locked link means a business owner has edited or claimed this listing
+  // directly on WordPress (see handleListingWebhook()) -- master_listings no
+  // longer owns this listing's content on this site, so skip the write
+  // entirely rather than overwriting whatever the owner changed. This is a
+  // deliberate no-op, not a failure: it still clears the queue entry (same
+  // "no retry queue" convention as every other outcome here), but leaves
+  // listing_site_links untouched.
+  if (existingLink?.locked) {
+    await env.DIRECTORY_DB.prepare(`DELETE FROM publish_queue WHERE id = ?`).bind(queueId).run();
+    await logAudit(env, {
+      action: "process_publish_queue_entry",
+      site_id: queueEntry.site_id,
+      listing_id: queueEntry.listing_id,
+      actor: actorFrom(request),
+      detail: { queue_id: queueId, queued_action: queueEntry.action, result: "skipped_locked" },
+    });
+    return {
+      id: queueId,
+      listing_id: queueEntry.listing_id,
+      site_id: queueEntry.site_id,
+      action: queueEntry.action,
+      skipped: true,
+      reason: "listing is locked (owner-managed) -- no changes made",
+    };
+  }
 
   try {
     const appConnection = await resolveAppPasswordConnection(env, queueEntry.site_id);
@@ -622,7 +665,8 @@ export async function processPublishQueueEntry(
           : await wordpressWrite(appConnection, geodirPlacesPath(), "POST", body);
 
       const created = upstream as { id?: unknown };
-      if (typeof created.id === "number") wpPostId = created.id;
+      const createdId = parseNumericId(created.id);
+      if (createdId !== null) wpPostId = createdId;
     }
 
     const publish_status = queueEntry.action === "unpublish" ? "unpublished" : "published";
@@ -668,6 +712,92 @@ export async function processPublishQueueEntry(
 
     throw new Error(`Publish failed for queue id ${queueId}, site ${queueEntry.site_id}: ${message}`);
   }
+}
+
+// Called by a small snippet on each WordPress site (see
+// worker-multisite-scoping.md's "Protecting owner-edited listings" section)
+// whenever a business owner saves a gd_place listing directly on WordPress
+// -- either editing one this Worker already published, or creating a brand
+// new one from scratch. Two outcomes:
+//
+//   1. wp_post_id matches a listing_site_links row we already track ->
+//      that listing is now owner-managed; set locked=1 so
+//      processPublishQueueEntry() never overwrites it again.
+//   2. wp_post_id is unknown to us -> a business added a listing WordPress
+//      never came from master_listings. Mirror it into master_listings
+//      (source='owner_created', status='owner_managed') and register a
+//      pre-locked listing_site_links row, so it's visible alongside
+//      imported listings rather than invisible to this system entirely.
+//
+// Deliberately not exposed as an MCP tool or /v1/write/* route -- this is
+// machine-to-machine from WordPress itself, authenticated with its own
+// WORDPRESS_WEBHOOK_SECRET rather than the write API key (see security.ts).
+export async function handleListingWebhook(env: Env, request: Request, input: Record<string, unknown>) {
+  const site_id = requireString(input.site_id, "site_id", { maxLength: 100 });
+  const wpPostIdInput = optionalNumber(input.wp_post_id, "wp_post_id");
+  if (wpPostIdInput === null) throw new ValidationError("wp_post_id is required");
+  const wp_post_id = wpPostIdInput;
+
+  const title = optionalString(input.title, "title", { maxLength: 500 }) ?? "Untitled listing";
+  const category = optionalString(input.category, "category", { maxLength: 200 });
+  const address = optionalString(input.address, "address", { maxLength: 500 });
+  const city = optionalString(input.city, "city", { maxLength: 200 });
+  const region = optionalString(input.region, "region", { maxLength: 200 });
+  const country = optionalString(input.country, "country", { maxLength: 200 });
+  const lat = optionalNumber(input.lat, "lat");
+  const lng = optionalNumber(input.lng, "lng");
+  const phone = optionalString(input.phone, "phone", { maxLength: 40 });
+  const website = optionalString(input.website, "website", { maxLength: 500 });
+
+  const site = await env.DIRECTORY_DB.prepare(`SELECT id FROM sites WHERE id = ? OR site_key = ?`)
+    .bind(site_id, site_id)
+    .first<{ id: string }>();
+  if (!site) throw new ValidationError(`Unknown site_id: ${site_id}`);
+
+  const existingLink = await env.DIRECTORY_DB.prepare(
+    `SELECT listing_id FROM listing_site_links WHERE site_id = ? AND wp_post_id = ?`,
+  )
+    .bind(site.id, wp_post_id)
+    .first<{ listing_id: string }>();
+
+  if (existingLink) {
+    await env.DIRECTORY_DB.prepare(`UPDATE listing_site_links SET locked = 1 WHERE listing_id = ? AND site_id = ?`)
+      .bind(existingLink.listing_id, site.id)
+      .run();
+    await logAudit(env, {
+      action: "listing_webhook_locked",
+      site_id: site.id,
+      listing_id: existingLink.listing_id,
+      actor: "wordpress-webhook",
+      detail: { wp_post_id },
+    });
+    return { listing_id: existingLink.listing_id, site_id: site.id, wp_post_id, locked: true, created_new: false };
+  }
+
+  const listing_id = crypto.randomUUID();
+  await env.DIRECTORY_DB.prepare(
+    `INSERT INTO master_listings
+       (id, source, source_id, name, category, address, city, region, country, lat, lng, phone, website, status, updated_at)
+     VALUES (?, 'owner_created', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'owner_managed', datetime('now'))`,
+  )
+    .bind(listing_id, String(wp_post_id), title, category, address, city, region, country, lat, lng, phone, website)
+    .run();
+
+  await env.DIRECTORY_DB.prepare(
+    `INSERT INTO listing_site_links (listing_id, site_id, wp_post_id, publish_status, last_attempt_at, locked)
+     VALUES (?, ?, ?, 'published', datetime('now'), 1)`,
+  )
+    .bind(listing_id, site.id, wp_post_id)
+    .run();
+
+  await logAudit(env, {
+    action: "listing_webhook_created",
+    site_id: site.id,
+    listing_id,
+    actor: "wordpress-webhook",
+    detail: { wp_post_id, title },
+  });
+  return { listing_id, site_id: site.id, wp_post_id, locked: true, created_new: true };
 }
 
 // The three functions below proxy through to GeoDirectory's own geodir/v2

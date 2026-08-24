@@ -26,6 +26,15 @@ export function isWriteAuthorized(request: Request, env: Env): boolean {
   return constantTimeEquals(supplied, env.DIRECTORY_ENGINE_WRITE_API_KEY);
 }
 
+// Gates POST /v1/webhook/listing-changed -- called by a small snippet on
+// each WordPress site (not by the user's own scripts), so it uses its own
+// secret rather than DIRECTORY_ENGINE_WRITE_API_KEY. See
+// worker-multisite-scoping.md's "Protecting owner-edited listings" section.
+export function isWebhookAuthorized(request: Request, env: Env): boolean {
+  const supplied = request.headers.get("x-directory-engine-webhook-secret");
+  return constantTimeEquals(supplied, env.WORDPRESS_WEBHOOK_SECRET);
+}
+
 export function corsHeaders(request: Request, env: Env): Headers {
   const requestId = request.headers.get("x-request-id")?.slice(0, 128) || crypto.randomUUID();
   const headers = new Headers({
