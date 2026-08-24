@@ -127,7 +127,7 @@ const WRITE_TOOLS = [
   ),
   tool(
     "upsert_integration_connection",
-    "Register or update a site's connection to an external system (e.g. WordPress/GeoDirectory). secret_reference names a Worker/Secrets Store binding -- the actual credential value is never passed through this tool. Requires a write key.",
+    "Register or update a site's connection to an external system (e.g. WordPress/GeoDirectory). secret_reference names a Worker/Secrets Store binding -- the actual credential value is never passed through this tool. credential_type distinguishes multiple credentials for the same site (e.g. geodir_consumer_key vs wp_application_password); omitting it defaults to geodir_consumer_key. Requires a write key.",
     {
       id: { type: "string", maxLength: 100 },
       site_id: { type: "string", maxLength: 100 },
@@ -135,6 +135,7 @@ const WRITE_TOOLS = [
       connection_key: { type: "string", maxLength: 200 },
       status: { type: "string", maxLength: 40 },
       secret_reference: { type: "string", maxLength: 200 },
+      credential_type: { type: "string", maxLength: 60 },
     },
     { readOnlyHint: false },
   ),

@@ -67,6 +67,12 @@ const SITE_ROLES = new Set(["master", "niche_template", "end_site"]);
 const SITE_STATUSES = new Set(["draft", "staging", "active", "paused", "retired"]);
 const CONNECTION_PROVIDERS = new Set(["wordpress", "geodirectory"]);
 const CONNECTION_STATUSES = new Set(["inactive", "active", "error"]);
+// credential_type distinguishes multiple credentials that can coexist for the
+// same site_id + provider pair (added 2026-08-24 -- see
+// worker-multisite-scoping.md's "Full-fleet credential verification" section).
+// geodir_consumer_key is the original/default type, kept as the fallback so
+// existing callers that don't pass credential_type behave exactly as before.
+const CREDENTIAL_TYPES = new Set(["geodir_consumer_key", "wp_application_password"]);
 const MASTER_LISTING_STATUSES = new Set(["pending_review", "approved", "rejected", "archived"]);
 const PUBLISH_STATUSES = new Set(["queued", "published", "failed", "unpublished"]);
 const PUBLISH_ACTIONS = new Set(["publish", "update", "unpublish"]);
@@ -197,28 +203,45 @@ export async function upsertIntegrationConnection(env: Env, request: Request, in
       ? null
       : JSON.stringify(input.configuration_json);
 
+  const credential_type =
+    optionalString(input.credential_type, "credential_type", { maxLength: 60 }) ?? "geodir_consumer_key";
+  if (!CREDENTIAL_TYPES.has(credential_type)) {
+    throw new ValidationError(`credential_type must be one of ${[...CREDENTIAL_TYPES].join(", ")}`);
+  }
+
   const site = await env.DIRECTORY_DB.prepare(`SELECT id FROM sites WHERE id = ?`).bind(site_id).first();
   if (!site) throw new ValidationError(`Unknown site_id: ${site_id}`);
 
-  const id = optionalString(input.id, "id", { maxLength: 100 }) ?? `${slugify(site_id)}-${provider}`;
+  // Keep the original id scheme (no credential_type suffix) for the default
+  // credential type, so existing rows created before credential_type existed
+  // keep resolving to the same id on re-upsert. Only new credential types get
+  // the disambiguating suffix, since they need one to avoid colliding with
+  // the default type's row for the same site_id + provider.
+  const id =
+    optionalString(input.id, "id", { maxLength: 100 }) ??
+    (credential_type === "geodir_consumer_key"
+      ? `${slugify(site_id)}-${provider}`
+      : `${slugify(site_id)}-${provider}-${credential_type}`);
+
   await env.DIRECTORY_DB.prepare(
-    `INSERT INTO integration_connections (id, site_id, provider, connection_key, status, secret_reference, configuration_json, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `INSERT INTO integration_connections (id, site_id, provider, connection_key, status, secret_reference, configuration_json, credential_type, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(id) DO UPDATE SET
        site_id = excluded.site_id, provider = excluded.provider, connection_key = excluded.connection_key,
        status = excluded.status, secret_reference = excluded.secret_reference,
-       configuration_json = excluded.configuration_json, updated_at = CURRENT_TIMESTAMP`,
+       configuration_json = excluded.configuration_json, credential_type = excluded.credential_type,
+       updated_at = CURRENT_TIMESTAMP`,
   )
-    .bind(id, site_id, provider, connection_key, status, secret_reference, configuration_json)
+    .bind(id, site_id, provider, connection_key, status, secret_reference, configuration_json, credential_type)
     .run();
 
   await logAudit(env, {
     action: "upsert_integration_connection",
     site_id,
     actor: actorFrom(request),
-    detail: { provider, status, secret_reference },
+    detail: { provider, status, secret_reference, credential_type },
   });
-  return { id, site_id, provider, connection_key, status, secret_reference };
+  return { id, site_id, provider, connection_key, status, secret_reference, credential_type };
 }
 
 export async function upsertMasterListing(env: Env, request: Request, input: Record<string, unknown>) {

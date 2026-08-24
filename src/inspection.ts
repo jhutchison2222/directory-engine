@@ -45,6 +45,58 @@ interface IntegrationConnectionRow {
   status: string;
   secret_reference: string | null;
   configuration_json: string | null;
+  credential_type: string | null;
+}
+
+interface ConnectionLookup {
+  site: SiteRow;
+  baseUrl: URL;
+  connection: IntegrationConnectionRow | null;
+}
+
+/**
+ * Shared site + integration_connections lookup, parameterized by
+ * credential_type so more than one credential per site/provider can coexist
+ * (added 2026-08-24 -- see worker-multisite-scoping.md's "Full-fleet
+ * credential verification" section for why: the Application Password
+ * credential needed a real home in this table instead of a hardcoded
+ * WP_APP_PASSWORD_<SITE> naming convention).
+ */
+async function lookupConnection(env: Env, siteId: string, credentialType: string): Promise<ConnectionLookup> {
+  const site = await env.DIRECTORY_DB.prepare(
+    `SELECT id, site_key, name, base_url, site_role, status FROM sites WHERE id = ? OR site_key = ? LIMIT 1`,
+  )
+    .bind(siteId, siteId)
+    .first<SiteRow>();
+  if (!site) throw new Error(`Unknown site_id: ${siteId}`);
+
+  const baseUrl = parseBaseUrl(site.base_url, `sites.base_url for ${siteId}`);
+
+  const connection = await env.DIRECTORY_DB.prepare(
+    `SELECT id, site_id, provider, status, secret_reference, configuration_json, credential_type
+       FROM integration_connections
+      WHERE site_id = ? AND provider = 'wordpress' AND credential_type = ?
+      ORDER BY updated_at DESC LIMIT 1`,
+  )
+    .bind(site.id, credentialType)
+    .first<IntegrationConnectionRow>();
+
+  return { site, baseUrl, connection };
+}
+
+function readSecretJson(env: Env, connection: IntegrationConnectionRow, siteId: string): Record<string, unknown> {
+  if (!connection.secret_reference) return {};
+  const rawSecret = env[connection.secret_reference];
+  if (typeof rawSecret !== "string" || !rawSecret) {
+    throw new Error(
+      `Secret binding "${connection.secret_reference}" for site ${siteId} is not configured on this Worker`,
+    );
+  }
+  try {
+    return JSON.parse(rawSecret) as Record<string, unknown>;
+  } catch {
+    throw new Error(`Secret binding "${connection.secret_reference}" for site ${siteId} is not valid JSON`);
+  }
 }
 
 function parseBaseUrl(rawUrl: string, sourceLabel: string): URL {
@@ -80,23 +132,7 @@ export async function resolveSiteConnection(env: Env, siteId?: string | null): P
     };
   }
 
-  const site = await env.DIRECTORY_DB.prepare(
-    `SELECT id, site_key, name, base_url, site_role, status FROM sites WHERE id = ? OR site_key = ? LIMIT 1`,
-  )
-    .bind(siteId, siteId)
-    .first<SiteRow>();
-  if (!site) throw new Error(`Unknown site_id: ${siteId}`);
-
-  const baseUrl = parseBaseUrl(site.base_url, `sites.base_url for ${siteId}`);
-
-  const connection = await env.DIRECTORY_DB.prepare(
-    `SELECT id, site_id, provider, status, secret_reference, configuration_json
-       FROM integration_connections
-      WHERE site_id = ? AND provider = 'wordpress'
-      ORDER BY updated_at DESC LIMIT 1`,
-  )
-    .bind(site.id)
-    .first<IntegrationConnectionRow>();
+  const { site, baseUrl, connection } = await lookupConnection(env, siteId, "geodir_consumer_key");
 
   if (!connection || connection.status !== "active") {
     // No active credentials registered yet for this site. Public,
@@ -106,25 +142,41 @@ export async function resolveSiteConnection(env: Env, siteId?: string | null): P
     return { siteId: site.id, baseUrl };
   }
 
-  let consumerKey: string | undefined;
-  let consumerSecret: string | undefined;
-  if (connection.secret_reference) {
-    const rawSecret = env[connection.secret_reference];
-    if (typeof rawSecret !== "string" || !rawSecret) {
-      throw new Error(
-        `Secret binding "${connection.secret_reference}" for site ${siteId} is not configured on this Worker`,
-      );
-    }
-    try {
-      const parsed = JSON.parse(rawSecret) as { consumerKey?: unknown; consumerSecret?: unknown };
-      consumerKey = typeof parsed.consumerKey === "string" ? parsed.consumerKey : undefined;
-      consumerSecret = typeof parsed.consumerSecret === "string" ? parsed.consumerSecret : undefined;
-    } catch {
-      throw new Error(`Secret binding "${connection.secret_reference}" for site ${siteId} is not valid JSON`);
-    }
-  }
+  const parsed = readSecretJson(env, connection, siteId);
+  const consumerKey = typeof parsed.consumerKey === "string" ? parsed.consumerKey : undefined;
+  const consumerSecret = typeof parsed.consumerSecret === "string" ? parsed.consumerSecret : undefined;
 
   return { siteId: site.id, baseUrl, consumerKey, consumerSecret };
+}
+
+/**
+ * Application Password connection for a site -- the WordPress-core-REST
+ * credential (distinct from the GeoDirectory Consumer Key/Secret above),
+ * now resolved the same way: through integration_connections, keyed by
+ * credential_type = 'wp_application_password'. Each site's row points at
+ * its own WP_APP_PASSWORD_<SITE> Worker secret via secret_reference, same
+ * as the Consumer Key/Secret pattern.
+ */
+export interface AppPasswordConnection {
+  siteId: string;
+  baseUrl: URL;
+  username?: string;
+  applicationPassword?: string;
+}
+
+export async function resolveAppPasswordConnection(env: Env, siteId: string): Promise<AppPasswordConnection> {
+  const { site, baseUrl, connection } = await lookupConnection(env, siteId, "wp_application_password");
+
+  if (!connection || connection.status !== "active") {
+    return { siteId: site.id, baseUrl };
+  }
+
+  const parsed = readSecretJson(env, connection, siteId);
+  const username = typeof parsed.username === "string" ? parsed.username : undefined;
+  const applicationPassword =
+    typeof parsed.applicationPassword === "string" ? parsed.applicationPassword : undefined;
+
+  return { siteId: site.id, baseUrl, username, applicationPassword };
 }
 
 function wordpressHeaders(connection: SiteConnection): Headers {
@@ -367,54 +419,25 @@ export function geoPath(resource: string): string {
 }
 
 /**
- * TEMPORARY diagnostic helper -- verifies a WP_APP_PASSWORD_<SITE> secret
- * was entered correctly in Cloudflare (right shape, one continuous JSON
- * line, real credentials) ahead of the real publish-queue processor being
- * built. This is not the long-term multi-credential design: integration_
- * connections still only has one secret_reference slot per site, and this
- * reads the WP_APP_PASSWORD_<SITE> binding directly by a hardcoded naming
- * convention rather than through that table. See worker-multisite-scoping.md's
- * "Not yet done" list. Safe to remove once the real processor supersedes it,
- * or to extend if it proves useful to keep around.
- *
- * Uses WordPress's own core REST API (wp/v2/users/me) rather than geodir/v2,
- * since Application Passwords authenticate against WordPress core, not
- * GeoDirectory's Consumer Key/Secret scheme. A GET to users/me is read-only --
- * it just confirms who the credential authenticates as, no listing created.
+ * Diagnostic helper -- confirms a site's Application Password (resolved via
+ * integration_connections, credential_type = 'wp_application_password', same
+ * as any other credential lookup) actually authenticates. Uses WordPress's
+ * own core REST API (wp/v2/users/me) rather than geodir/v2, since Application
+ * Passwords authenticate against WordPress core, not GeoDirectory's Consumer
+ * Key/Secret scheme. A GET to users/me is read-only -- it just confirms who
+ * the credential authenticates as, no listing created.
  */
 export async function testAppPasswordConnection(env: Env, siteKey: string) {
   try {
-    const site = await env.DIRECTORY_DB.prepare(
-      `SELECT id, site_key, base_url FROM sites WHERE site_key = ? LIMIT 1`,
-    )
-      .bind(siteKey)
-      .first<{ id: string; site_key: string; base_url: string }>();
-    if (!site) throw new Error(`Unknown site_key: ${siteKey}`);
-
-    const baseUrl = parseBaseUrl(site.base_url, `sites.base_url for ${siteKey}`);
-    const bindingName = `WP_APP_PASSWORD_${siteKey.toUpperCase()}`;
-    const rawSecret = env[bindingName];
-    if (typeof rawSecret !== "string" || !rawSecret) {
-      throw new Error(`Secret binding "${bindingName}" is not configured on this Worker`);
+    const connection = await resolveAppPasswordConnection(env, siteKey);
+    if (!connection.username || !connection.applicationPassword) {
+      throw new Error(`No active wp_application_password credential registered for site ${siteKey}`);
     }
 
-    let username: string | undefined;
-    let applicationPassword: string | undefined;
-    try {
-      const parsed = JSON.parse(rawSecret) as { username?: unknown; applicationPassword?: unknown };
-      username = typeof parsed.username === "string" ? parsed.username : undefined;
-      applicationPassword = typeof parsed.applicationPassword === "string" ? parsed.applicationPassword : undefined;
-    } catch {
-      throw new Error(`Secret binding "${bindingName}" is not valid JSON`);
-    }
-    if (!username || !applicationPassword) {
-      throw new Error(`Secret binding "${bindingName}" is missing "username" or "applicationPassword"`);
-    }
-
-    const url = new URL("wp-json/wp/v2/users/me", baseUrl);
+    const url = new URL("wp-json/wp/v2/users/me", connection.baseUrl);
     const headers = new Headers({
       accept: "application/json",
-      authorization: `Basic ${btoa(`${username}:${applicationPassword}`)}`,
+      authorization: `Basic ${btoa(`${connection.username}:${connection.applicationPassword}`)}`,
     });
     const response = await fetch(url, {
       headers,
@@ -429,12 +452,11 @@ export async function testAppPasswordConnection(env: Env, siteKey: string) {
       body = { message: text };
     }
     if (!response.ok) {
-      return { site_id: site.id, binding: bindingName, authenticated: false, status: response.status, detail: body };
+      return { site_id: connection.siteId, authenticated: false, status: response.status, detail: body };
     }
     const user = body as { id?: number; name?: string; roles?: string[] };
     return {
-      site_id: site.id,
-      binding: bindingName,
+      site_id: connection.siteId,
       authenticated: true,
       status: response.status,
       user: { id: user.id, name: user.name, roles: user.roles },
