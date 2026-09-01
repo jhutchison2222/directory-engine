@@ -99,3 +99,5 @@ requireCondition(
 );
 
 console.log("Project governance validation passed.");
+
+// DE-0003 bootstrap only; Claude must remove this comment in the material implementation.
