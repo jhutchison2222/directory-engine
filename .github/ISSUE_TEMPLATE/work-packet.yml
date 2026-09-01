@@ -91,3 +91,15 @@ body:
         - human
     validations:
       required: true
+  - type: dropdown
+    id: max_remediation_cycles
+    attributes:
+      label: Maximum remediation cycles
+      description: Deterministic cap on remediation cycles for this packet (0-3).
+      options:
+        - "0"
+        - "1"
+        - "2"
+        - "3"
+    validations:
+      required: true

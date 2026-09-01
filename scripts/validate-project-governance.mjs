@@ -1,5 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { validateRemediationFixture } from "./lib/validate-remediation-fixture.mjs";
+import { assertValidAgainstSchema } from "./lib/json-schema-lite.mjs";
+import { readJsonFile } from "./lib/read-json-file.mjs";
+import { findFieldById } from "./lib/work-packet-template.mjs";
+import { buildRemediationCycleOptions } from "./lib/remediation-cycles.mjs";
+import { assertAutomationPhaseInvariants } from "./lib/automation-phase.mjs";
 
 const requiredFiles = [
   "AGENTS.md",
@@ -36,28 +41,46 @@ const requireCondition = (condition, message) => {
 
 requireCondition(workPacketSchema.additionalProperties === false, "work-packet schema must fail closed on unknown properties");
 requireCondition(projectStateSchema.additionalProperties === false, "project-state schema must fail closed on unknown properties");
-requireCondition(state.accepted_architecture === "ADR-001-national-niche-domains", "accepted architecture must be ADR-001");
-requireCondition(/^[0-9a-f]{40}$/.test(state.repository_baseline), "repository baseline must be a full commit SHA");
+
+assertValidAgainstSchema(projectStateSchema, state, "project/current-state.json");
+
+requireCondition(
+  workPacketSchema.required.includes("max_remediation_cycles"),
+  "work-packet schema must require max_remediation_cycles",
+);
+const maxRemediationCyclesField = findFieldById(
+  contents.get(".github/ISSUE_TEMPLATE/work-packet.yml"),
+  "max_remediation_cycles",
+);
+requireCondition(
+  maxRemediationCyclesField !== null,
+  "work-packet issue template must define a max_remediation_cycles field",
+);
+requireCondition(
+  maxRemediationCyclesField.type === "dropdown",
+  "max_remediation_cycles field must be a dropdown for deterministic mapping",
+);
+requireCondition(maxRemediationCyclesField.required === true, "max_remediation_cycles field must be required");
+const expectedRemediationCycleOptions = buildRemediationCycleOptions(workPacketSchema.properties.max_remediation_cycles);
+requireCondition(
+  JSON.stringify(maxRemediationCyclesField.options) === JSON.stringify(expectedRemediationCycleOptions),
+  `max_remediation_cycles dropdown options must exactly match schema bounds: ${expectedRemediationCycleOptions.join(", ")}`,
+);
+
 requireCondition(state.repository_capability === "contains_write_paths", "repository capability must acknowledge current write paths");
 requireCondition(state.deployed_capability === "unverified", "deployed capability must remain unverified in foundation phase");
 requireCondition(
-  state.automation_phase === "foundation" || state.automation_phase === "fixture",
-  "automation phase must remain foundation or fixture until the end-to-end fixture is proven",
+  ["foundation", "fixture", "code_only"].includes(state.automation_phase),
+  "automation phase must remain foundation, fixture, or code_only until staging is authorized",
 );
-requireCondition(state.auto_merge_enabled === false, "auto-merge must remain disabled before the fixture is proven");
-requireCondition(state.production_mutations_authorized === false, "the fixture phase must not authorize production mutations");
+requireCondition(state.auto_merge_enabled === false, "auto-merge must remain disabled before staging is authorized");
+requireCondition(state.production_mutations_authorized === false, "this automation stage must not authorize production mutations");
 
-if (state.automation_phase === "foundation") {
-  requireCondition(state.active_work_packet === null, "foundation must not claim an active automated work packet");
-} else {
-  requireCondition(state.active_work_packet === "DE-0002", "fixture phase must record DE-0002 as the active work packet");
+assertAutomationPhaseInvariants(state);
+
+if (state.automation_phase === "fixture") {
   const fixturePath = "project/fixtures/de-0002-remediation-probe.json";
-  let fixture;
-  try {
-    fixture = JSON.parse(await readFile(fixturePath, "utf8"));
-  } catch (error) {
-    throw new Error(`${fixturePath} is not valid JSON: ${error.message}`);
-  }
+  const fixture = await readJsonFile(fixturePath);
   validateRemediationFixture(fixture, state.active_work_packet);
 }
 
