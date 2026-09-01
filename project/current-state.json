@@ -16,3 +16,4 @@
     "DE-0002 proved the Claude implementation -> CI -> Codex review -> remediation -> delta review loop end to end and is complete. DE-0003 is the current active, code-only governance-correction work packet; it does not authorize any staging, production, or live-system operation."
   ]
 }
+
