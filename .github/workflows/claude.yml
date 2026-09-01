@@ -25,10 +25,19 @@ jobs:
       id-token: write
       actions: read # Required for Claude to read CI results on PRs
     steps:
+      - name: Generate repository-scoped App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.DIRECTORY_ENGINE_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.DIRECTORY_ENGINE_AUTOMATION_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Run Claude Code
         id: claude
@@ -43,5 +52,3 @@ jobs:
           # Auto-approve only the exact local validation commands required by DE-0002.
           claude_args: >-
             --allowedTools "Bash(npm install --ignore-scripts --legacy-peer-deps),Bash(npm run check:governance),Bash(npm run typecheck),Bash(npm test),Bash(jq empty project/current-state.json project/fixtures/de-0002-remediation-probe.json),Bash(git diff --check)"
-
-# DE-0004 bootstrap only; Claude must remove this comment in the material implementation.
