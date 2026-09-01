@@ -1,0 +1,43 @@
+name: Project governance
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-governance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        # The existing repository has no lockfile and its broad Wrangler range
+        # currently resolves to a release with a newer optional workers-types
+        # peer. Preserve the existing package contract in this foundation PR;
+        # dependency pinning belongs in a separate reviewed work packet.
+        run: npm install --ignore-scripts --legacy-peer-deps
+
+      - name: Validate governance
+        run: npm run check:governance
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test

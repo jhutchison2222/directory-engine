@@ -1,5 +1,21 @@
 # Directory Engine
 
+## Repository state notice
+
+The text below documents the original deployed v0.2.0 read-only baseline. The
+current `main` source also contains later write paths and owner-edit safeguard
+work, while the deployment state of those paths has not been independently
+verified in this repository review. Do not infer live capability from either the
+historical README or source code alone.
+
+The machine-readable observed state is in
+[`project/current-state.json`](project/current-state.json). The accepted future
+architecture is one nationwide directory per niche, recorded in
+[`ADR-001`](docs/decisions/ADR-001-national-niche-domains.md). Neither document
+authorizes a deployment or live mutation.
+
+## Historical v0.2.0 baseline
+
 Directory Engine v0.2.0 is the deployed, read-only Cloudflare Worker for
 inspecting WordPress, GeoDirectory, and an existing D1 database. This repository
 preserves that REST contract and adds a stateless, read-only MCP endpoint at
@@ -86,7 +102,8 @@ for safe configuration, validation, and smoke-test commands.
 ## Development
 
 ```sh
-npm install
+npm install --legacy-peer-deps
+npm run check:governance
 npm test
 npm run typecheck
 npm run dev
