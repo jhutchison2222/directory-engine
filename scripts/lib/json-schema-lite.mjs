@@ -1,5 +1,5 @@
 const DATE_TIME_PATTERN =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
 
 const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
@@ -11,7 +11,8 @@ export function isValidDateTime(value) {
   if (typeof value !== "string") return false;
   const match = DATE_TIME_PATTERN.exec(value);
   if (!match) return false;
-  const [, yearStr, monthStr, dayStr, hourStr, minuteStr, secondStr] = match;
+  const [, yearStr, monthStr, dayStr, hourStr, minuteStr, secondStr, offsetSign, offsetHourStr, offsetMinuteStr] =
+    match;
   const year = Number(yearStr);
   const month = Number(monthStr);
   const day = Number(dayStr);
@@ -22,6 +23,11 @@ export function isValidDateTime(value) {
   const maxDay = month === 2 && isLeapYear(year) ? 29 : DAYS_IN_MONTH[month - 1];
   if (day < 1 || day > maxDay) return false;
   if (hour > 23 || minute > 59 || second > 59) return false;
+  if (offsetSign !== undefined) {
+    const offsetHour = Number(offsetHourStr);
+    const offsetMinute = Number(offsetMinuteStr);
+    if (offsetHour > 23 || offsetMinute > 59) return false;
+  }
   return true;
 }
 

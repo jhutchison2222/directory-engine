@@ -46,6 +46,11 @@ describe("validateAgainstSchema against the project-state schema", () => {
     expect(errors.some((message) => message.includes("updated_at"))).toBe(true);
   });
 
+  it("rejects an updated_at with an out-of-range numeric timezone offset", () => {
+    const errors = validateAgainstSchema(schema, { ...validState, updated_at: "2026-09-01T20:26:00+99:99" });
+    expect(errors.some((message) => message.includes("updated_at"))).toBe(true);
+  });
+
   it("rejects a missing required property", () => {
     const { next_step, ...withoutNextStep } = validState;
     const errors = validateAgainstSchema(schema, withoutNextStep);
@@ -93,5 +98,16 @@ describe("isValidDateTime", () => {
   it("rejects garbage input and non-string values", () => {
     expect(isValidDateTime("not-a-date")).toBe(false);
     expect(isValidDateTime(20260901)).toBe(false);
+  });
+
+  it("accepts a boundary-valid numeric timezone offset", () => {
+    expect(isValidDateTime("2026-09-01T20:26:00+23:59")).toBe(true);
+    expect(isValidDateTime("2026-09-01T20:26:00-00:00")).toBe(true);
+  });
+
+  it("rejects an out-of-range numeric timezone offset", () => {
+    expect(isValidDateTime("2026-09-01T20:26:00+99:99")).toBe(false);
+    expect(isValidDateTime("2026-09-01T20:26:00+24:00")).toBe(false);
+    expect(isValidDateTime("2026-09-01T20:26:00+00:60")).toBe(false);
   });
 });
