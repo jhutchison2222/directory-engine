@@ -43,3 +43,5 @@ jobs:
           # Auto-approve only the exact local validation commands required by DE-0002.
           claude_args: >-
             --allowedTools "Bash(npm install --ignore-scripts --legacy-peer-deps),Bash(npm run check:governance),Bash(npm run typecheck),Bash(npm test),Bash(jq empty project/current-state.json project/fixtures/de-0002-remediation-probe.json),Bash(git diff --check)"
+
+# DE-0004 bootstrap only; Claude must remove this comment in the material implementation.
