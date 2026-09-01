@@ -1,5 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { validateRemediationFixture } from "./lib/validate-remediation-fixture.mjs";
+import { assertValidAgainstSchema } from "./lib/json-schema-lite.mjs";
+import { readJsonFile } from "./lib/read-json-file.mjs";
+import { findFieldById } from "./lib/work-packet-template.mjs";
+import { buildRemediationCycleOptions } from "./lib/remediation-cycles.mjs";
 
 const requiredFiles = [
   "AGENTS.md",
@@ -36,8 +40,32 @@ const requireCondition = (condition, message) => {
 
 requireCondition(workPacketSchema.additionalProperties === false, "work-packet schema must fail closed on unknown properties");
 requireCondition(projectStateSchema.additionalProperties === false, "project-state schema must fail closed on unknown properties");
-requireCondition(state.accepted_architecture === "ADR-001-national-niche-domains", "accepted architecture must be ADR-001");
-requireCondition(/^[0-9a-f]{40}$/.test(state.repository_baseline), "repository baseline must be a full commit SHA");
+
+assertValidAgainstSchema(projectStateSchema, state, "project/current-state.json");
+
+requireCondition(
+  workPacketSchema.required.includes("max_remediation_cycles"),
+  "work-packet schema must require max_remediation_cycles",
+);
+const maxRemediationCyclesField = findFieldById(
+  contents.get(".github/ISSUE_TEMPLATE/work-packet.yml"),
+  "max_remediation_cycles",
+);
+requireCondition(
+  maxRemediationCyclesField !== null,
+  "work-packet issue template must define a max_remediation_cycles field",
+);
+requireCondition(
+  maxRemediationCyclesField.type === "dropdown",
+  "max_remediation_cycles field must be a dropdown for deterministic mapping",
+);
+requireCondition(maxRemediationCyclesField.required === true, "max_remediation_cycles field must be required");
+const expectedRemediationCycleOptions = buildRemediationCycleOptions(workPacketSchema.properties.max_remediation_cycles);
+requireCondition(
+  JSON.stringify(maxRemediationCyclesField.options) === JSON.stringify(expectedRemediationCycleOptions),
+  `max_remediation_cycles dropdown options must exactly match schema bounds: ${expectedRemediationCycleOptions.join(", ")}`,
+);
+
 requireCondition(state.repository_capability === "contains_write_paths", "repository capability must acknowledge current write paths");
 requireCondition(state.deployed_capability === "unverified", "deployed capability must remain unverified in foundation phase");
 requireCondition(
@@ -52,12 +80,7 @@ if (state.automation_phase === "foundation") {
 } else {
   requireCondition(state.active_work_packet === "DE-0002", "fixture phase must record DE-0002 as the active work packet");
   const fixturePath = "project/fixtures/de-0002-remediation-probe.json";
-  let fixture;
-  try {
-    fixture = JSON.parse(await readFile(fixturePath, "utf8"));
-  } catch (error) {
-    throw new Error(`${fixturePath} is not valid JSON: ${error.message}`);
-  }
+  const fixture = await readJsonFile(fixturePath);
   validateRemediationFixture(fixture, state.active_work_packet);
 }
 
@@ -99,5 +122,3 @@ requireCondition(
 );
 
 console.log("Project governance validation passed.");
-
-// DE-0003 bootstrap only; Claude must remove this comment in the material implementation.
