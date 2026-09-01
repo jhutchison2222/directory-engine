@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://directory-engine.invalid/schemas/project-state.schema.json",
+  "title": "Directory Engine project state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "updated_at",
+    "accepted_architecture",
+    "repository_baseline",
+    "repository_capability",
+    "deployed_capability",
+    "automation_phase",
+    "auto_merge_enabled",
+    "production_mutations_authorized",
+    "active_work_packet",
+    "next_step"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "accepted_architecture": { "const": "ADR-001-national-niche-domains" },
+    "repository_baseline": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "repository_capability": { "enum": ["read_only", "contains_write_paths", "unverified"] },
+    "deployed_capability": { "enum": ["read_only", "write_enabled", "unverified"] },
+    "automation_phase": { "enum": ["foundation", "fixture", "code_only", "staging", "production"] },
+    "auto_merge_enabled": { "type": "boolean" },
+    "production_mutations_authorized": { "type": "boolean" },
+    "active_work_packet": { "type": ["string", "null"], "pattern": "^DE-[0-9]{4}$" },
+    "next_step": { "type": "string", "minLength": 1 },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

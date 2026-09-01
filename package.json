@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "check:governance": "node scripts/validate-project-governance.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest run",

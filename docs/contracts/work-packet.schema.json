@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://directory-engine.invalid/schemas/work-packet.schema.json",
+  "title": "Directory Engine work packet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "packet_id",
+    "title",
+    "state",
+    "authorization_class",
+    "baseline_sha",
+    "objective",
+    "allowed_changes",
+    "prohibited_changes",
+    "required_checks",
+    "required_evidence",
+    "acceptance_criteria",
+    "implementer",
+    "reviewer",
+    "max_remediation_cycles"
+  ],
+  "properties": {
+    "packet_id": { "type": "string", "pattern": "^DE-[0-9]{4}$" },
+    "title": { "type": "string", "minLength": 1 },
+    "state": {
+      "enum": [
+        "draft",
+        "ready_for_implementation",
+        "implementing",
+        "ready_for_review",
+        "changes_requested",
+        "accepted",
+        "merge_ready",
+        "completed",
+        "blocked"
+      ]
+    },
+    "authorization_class": {
+      "enum": ["code_only", "staging", "production_reversible", "high_risk"]
+    },
+    "baseline_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "objective": { "type": "string", "minLength": 1 },
+    "allowed_changes": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "prohibited_changes": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "required_checks": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "required_evidence": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "implementer": { "enum": ["claude", "codex", "human"] },
+    "reviewer": { "enum": ["claude", "codex", "human"] },
+    "max_remediation_cycles": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "depends_on": { "type": "array", "items": { "type": "string", "pattern": "^DE-[0-9]{4}$" } },
+    "owner_approval_reference": { "type": ["string", "null"] }
+  }
+}

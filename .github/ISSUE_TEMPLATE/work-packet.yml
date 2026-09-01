@@ -1,0 +1,93 @@
+name: Directory Engine work packet
+description: Create a bounded maker/reviewer task for Claude and Codex
+title: "[DE-0000] "
+labels:
+  - work-packet
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Complete every required field. Creating an issue does not authorize production operations.
+  - type: input
+    id: packet_id
+    attributes:
+      label: Packet ID
+      placeholder: DE-0000
+    validations:
+      required: true
+  - type: dropdown
+    id: authorization_class
+    attributes:
+      label: Authorization class
+      options:
+        - code_only
+        - staging
+        - production_reversible
+        - high_risk
+    validations:
+      required: true
+  - type: input
+    id: baseline_sha
+    attributes:
+      label: Accepted baseline SHA
+      placeholder: 40-character commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+    validations:
+      required: true
+  - type: textarea
+    id: allowed_changes
+    attributes:
+      label: Allowed changes
+      description: Exact files, systems, or operations in scope.
+    validations:
+      required: true
+  - type: textarea
+    id: prohibited_changes
+    attributes:
+      label: Prohibited changes
+      description: Explicit exclusions and safety boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: required_checks
+    attributes:
+      label: Required checks
+    validations:
+      required: true
+  - type: textarea
+    id: required_evidence
+    attributes:
+      label: Required evidence
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: dropdown
+    id: implementer
+    attributes:
+      label: Implementer
+      options:
+        - claude
+        - codex
+        - human
+    validations:
+      required: true
+  - type: dropdown
+    id: reviewer
+    attributes:
+      label: Independent reviewer
+      options:
+        - codex
+        - claude
+        - human
+    validations:
+      required: true
