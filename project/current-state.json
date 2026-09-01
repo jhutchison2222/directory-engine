@@ -1,17 +1,18 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-01T17:15:38Z",
+  "updated_at": "2026-09-01T20:26:00Z",
   "accepted_architecture": "ADR-001-national-niche-domains",
   "repository_baseline": "8973c1ceef4c25fb19fab743ec85db65f7011b3f",
   "repository_capability": "contains_write_paths",
   "deployed_capability": "unverified",
-  "automation_phase": "foundation",
+  "automation_phase": "fixture",
   "auto_merge_enabled": false,
   "production_mutations_authorized": false,
-  "active_work_packet": null,
-  "next_step": "Review and merge the code-only collaboration foundation, then inventory agent credentials and permissions for a harmless dispatch fixture.",
+  "active_work_packet": "DE-0002",
+  "next_step": "Await Codex's exact-head review of the inert NEEDS_REMEDIATION probe on the DE-0002 fixture, then remediate to RESOLVED and complete Codex delta review.",
   "notes": [
     "The repository README still describes v0.2.0 as read-only while current main contains write-path source code; deployment state must not be inferred from either statement.",
-    "No WordPress, Cloudflare, D1, DNS, deployment, secret, redirect, listing, or indexation change is authorized by this state file."
+    "No WordPress, Cloudflare, D1, DNS, deployment, secret, redirect, listing, or indexation change is authorized by this state file.",
+    "DE-0002 is an unproven, code-only fixture proving the Claude implementation -> CI -> Codex review -> remediation -> delta review loop. The first material head intentionally carries \"remediation_probe\": \"NEEDS_REMEDIATION\" in project/fixtures/de-0002-remediation-probe.json pending the expected Codex finding."
   ]
 }
