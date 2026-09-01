@@ -91,3 +91,17 @@ body:
         - human
     validations:
       required: true
+  - type: dropdown
+    id: max_remediation_cycles
+    attributes:
+      label: Maximum remediation cycles
+      description: >-
+        Deterministic cap forwarded verbatim as the work-packet contract's
+        required integer max_remediation_cycles field (0-3).
+      options:
+        - "0"
+        - "1"
+        - "2"
+        - "3"
+    validations:
+      required: true
