@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { validateRemediationFixture } from "./lib/validate-remediation-fixture.mjs";
 
 const requiredFiles = [
   "AGENTS.md",
@@ -39,10 +40,26 @@ requireCondition(state.accepted_architecture === "ADR-001-national-niche-domains
 requireCondition(/^[0-9a-f]{40}$/.test(state.repository_baseline), "repository baseline must be a full commit SHA");
 requireCondition(state.repository_capability === "contains_write_paths", "repository capability must acknowledge current write paths");
 requireCondition(state.deployed_capability === "unverified", "deployed capability must remain unverified in foundation phase");
-requireCondition(state.automation_phase === "foundation", "automation phase must remain foundation until the fixture is reviewed");
-requireCondition(state.auto_merge_enabled === false, "auto-merge must remain disabled in foundation phase");
-requireCondition(state.production_mutations_authorized === false, "foundation must not authorize production mutations");
-requireCondition(state.active_work_packet === null, "foundation must not claim an active automated work packet");
+requireCondition(
+  state.automation_phase === "foundation" || state.automation_phase === "fixture",
+  "automation phase must remain foundation or fixture until the end-to-end fixture is proven",
+);
+requireCondition(state.auto_merge_enabled === false, "auto-merge must remain disabled before the fixture is proven");
+requireCondition(state.production_mutations_authorized === false, "the fixture phase must not authorize production mutations");
+
+if (state.automation_phase === "foundation") {
+  requireCondition(state.active_work_packet === null, "foundation must not claim an active automated work packet");
+} else {
+  requireCondition(state.active_work_packet === "DE-0002", "fixture phase must record DE-0002 as the active work packet");
+  const fixturePath = "project/fixtures/de-0002-remediation-probe.json";
+  let fixture;
+  try {
+    fixture = JSON.parse(await readFile(fixturePath, "utf8"));
+  } catch (error) {
+    throw new Error(`${fixturePath} is not valid JSON: ${error.message}`);
+  }
+  validateRemediationFixture(fixture, state.active_work_packet);
+}
 
 for (const agentFile of ["AGENTS.md", "CLAUDE.md"]) {
   requireCondition(
