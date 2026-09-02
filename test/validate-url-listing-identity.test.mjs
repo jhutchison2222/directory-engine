@@ -20,15 +20,20 @@ const INVALID_FIXTURES = [
   ["de-0006-invalid-malformed.json", "malformed"],
   ["de-0006-invalid-country-prefixed.json", "country-prefixed"],
   ["de-0006-invalid-metro-parented.json", "metro-parented"],
+  ["de-0006-invalid-metro-parented-url.json", "metro-parented"],
   ["de-0006-invalid-service-in-business-url.json", "service-in-business-url"],
   ["de-0006-invalid-duplicate-branch.json", "duplicate-branch"],
   ["de-0006-invalid-unsafe-indexation.json", "unsafe-indexation"],
+  ["de-0006-invalid-unsafe-indexation-empty-intersection.json", "unsafe-indexation"],
   ["de-0006-invalid-duplicate-canonical-url.json", "duplicate-canonical-url"],
   ["de-0006-invalid-identity-mismatch.json", "identity-mismatch"],
+  ["de-0006-invalid-identity-mismatch-orphan-url.json", "identity-mismatch"],
   ["de-0006-invalid-unknown-service.json", "unknown-service"],
+  ["de-0006-invalid-unknown-service-url-leaf.json", "unknown-service"],
   ["de-0006-invalid-redirect-conflict.json", "redirect-conflict"],
   ["de-0006-invalid-redirect-unknown-target.json", "redirect-unknown-target"],
   ["de-0006-invalid-redirect-cycle.json", "redirect-cycle"],
+  ["de-0006-invalid-malformed-redirect.json", "malformed"],
 ];
 
 describe("de-0006-url-listing-identity.valid.json", () => {

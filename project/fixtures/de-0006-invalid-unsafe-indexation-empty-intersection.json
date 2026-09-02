@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "niche_domain": "example-water-heater-repair.com",
+  "country": "US",
+  "service_taxonomy": ["water-heater-repair"],
+  "canonical_urls": [
+    {
+      "path": "/colorado/denver/water-heater-repair/",
+      "kind": "service_area",
+      "indexable": true,
+      "sitemap_eligible": true,
+      "indexation_readiness": {
+        "has_listings": true,
+        "data_quality_checked": true,
+        "has_unique_content": true,
+        "canonical_validated": true,
+        "internally_linked": true
+      }
+    }
+  ],
+  "listings": [],
+  "redirects": []
+}

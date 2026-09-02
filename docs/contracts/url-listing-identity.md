@@ -163,6 +163,11 @@ schema.
 
 `project/fixtures/de-0006-url-listing-identity.valid.json` is a representative
 valid contract document. `project/fixtures/de-0006-invalid-*.json` each
-contain a deliberate violation, one file per fail-closed category listed
-above, plus `de-0006-invalid-country-not-us.json` for the internal country
-identity requirement.
+contain a deliberate violation, at least one file per fail-closed category
+listed above, plus `de-0006-invalid-country-not-us.json` for the internal
+country identity requirement. Some categories have more than one isolated
+fixture because the validator reports that category from more than one
+independent branch — for example, a `canonical_urls` entry parented under a
+metro slug versus a listing `canonical_path` parented under one, or a page
+marked indexable with unmet readiness signals versus one with no backing
+listing at all.

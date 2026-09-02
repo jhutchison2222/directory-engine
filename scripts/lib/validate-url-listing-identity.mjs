@@ -85,6 +85,18 @@ export function validateUrlListingIdentity(contract) {
         );
       }
     }
+
+    if (segments.length >= 2) {
+      const [stateSegment, citySegment] = segments;
+      const parentedUnderMetro = contract.listings.some(
+        (listing) => listing.state === stateSegment && listing.metro === citySegment && listing.metro !== listing.city,
+      );
+      if (parentedUnderMetro) {
+        errors.push(
+          `metro-parented: canonical_urls path "${url.path}" is parented under metro "${citySegment}" instead of a city`,
+        );
+      }
+    }
   }
 
   const businessUrls = contract.canonical_urls.filter((url) => url.kind === "business");
