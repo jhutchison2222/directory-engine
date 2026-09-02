@@ -40,8 +40,11 @@ const GEOGRAPHY_TERMS = new Set([...US_STATE_SLUGS, ...US_METRO_SLUGS, "metro", 
 /**
  * Detects a US state name, major metro/city name, or a bare geography/metro
  * keyword (each as a contiguous run of hyphen-separated tokens) inside a
- * kebab-case identity slug, so niche and site identity stay independent of
- * geography per ADR-001.
+ * kebab-case identity slug. This is a diagnostic aid only, for the finite set
+ * of terms it happens to recognize: it is NOT the authoritative fail-closed
+ * check, because no hyphen-token blocklist of city/metro names can ever be
+ * complete. `hasUnrecognizedIdentityToken` below is the actual fail-closed
+ * backstop.
  */
 function containsGeographyTerm(slug) {
   const tokens = slug.split("-");
@@ -54,6 +57,60 @@ function containsGeographyTerm(slug) {
     }
   }
   return false;
+}
+
+// The explicit, contract-declared allowlist of service-taxonomy and
+// site-naming word roots this registry currently recognizes. This is the
+// authoritative fail-closed mechanism for keeping geography (and any other
+// unsupported vocabulary, whether it is a city name this contract has never
+// seen or something else entirely) out of niche/site/origin identity: an
+// identity slug is accepted only if it can be built entirely out of these
+// tokens. A blocklist of known geography terms (`GEOGRAPHY_TERMS` above) can
+// never be complete, because it would require enumerating every US place
+// name; an allowlist can be complete by construction, because unrecognized
+// tokens fail closed instead of being silently accepted. Extending this
+// registry to a new niche or site name is a deliberate, reviewable change to
+// this list, not a silent gap.
+const RECOGNIZED_IDENTITY_TOKENS = new Set([
+  "water", "heater", "repair", "drain", "cleaning", "plumbing", "plumber", "plumbers",
+  "finder", "national", "nationwide", "pros", "niche", "shared",
+]);
+
+/**
+ * Determines whether `flattened` (a lowercase string with hyphens already
+ * removed) can be built as a concatenation of zero or more tokens from
+ * `vocabulary`. Used to fail closed on any identity slug containing a token
+ * this contract has not explicitly recognized, whether or not that token is
+ * known to be a geography term.
+ */
+function canDecomposeFromVocabulary(flattened, vocabulary, memo = new Map()) {
+  if (flattened.length === 0) {
+    return true;
+  }
+  if (memo.has(flattened)) {
+    return memo.get(flattened);
+  }
+  let decomposable = false;
+  for (let end = 1; end <= flattened.length; end += 1) {
+    const prefix = flattened.slice(0, end);
+    if (vocabulary.has(prefix) && canDecomposeFromVocabulary(flattened.slice(end), vocabulary, memo)) {
+      decomposable = true;
+      break;
+    }
+  }
+  memo.set(flattened, decomposable);
+  return decomposable;
+}
+
+/**
+ * Fails closed on any hyphen-separated identity slug that contains a token
+ * outside the explicit `RECOGNIZED_IDENTITY_TOKENS` allowlist, regardless of
+ * whether that token happens to be a known geography term. This is what
+ * makes the geography/identity separation deterministic and complete instead
+ * of dependent on an inherently non-exhaustive city/metro blocklist.
+ */
+function hasUnrecognizedIdentityToken(slug) {
+  return !canDecomposeFromVocabulary(slug.replace(/-/g, ""), RECOGNIZED_IDENTITY_TOKENS);
 }
 
 /**
@@ -118,6 +175,11 @@ function validateOrigin(origin, siteId) {
           `metro-specific-origin: site "${siteId}" origin "${origin}" domain label "${registrableLabel}" embeds a geography or metro term, which recreates the separate per-metro-domain pattern ADR-001 supersedes instead of one nationwide canonical origin per niche`,
         );
       }
+      if (hasUnrecognizedIdentityToken(registrableLabel)) {
+        errors.push(
+          `unrecognized-identity-token: site "${siteId}" origin "${origin}" domain label "${registrableLabel}" contains a token outside the recognized identity vocabulary, so it cannot be confirmed free of geography or other unsupported content`,
+        );
+      }
     }
   }
 
@@ -161,10 +223,20 @@ export function validateNicheSiteRegistry(contract) {
         `geography-embedded-niche: niche_id "${record.niche_id}" embeds a geography or metro term, which ADR-001 requires to stay independent of service taxonomy identity`,
       );
     }
+    if (hasUnrecognizedIdentityToken(record.niche_id)) {
+      errors.push(
+        `unrecognized-identity-token: niche_id "${record.niche_id}" contains a token outside the recognized identity vocabulary, so it cannot be confirmed free of geography or other unsupported content`,
+      );
+    }
 
     if (containsGeographyTerm(record.site_id)) {
       errors.push(
         `site-identity-geography-conflation: site_id "${record.site_id}" embeds a geography or metro term, conflating canonical site identity with geography`,
+      );
+    }
+    if (hasUnrecognizedIdentityToken(record.site_id)) {
+      errors.push(
+        `unrecognized-identity-token: site_id "${record.site_id}" contains a token outside the recognized identity vocabulary, so it cannot be confirmed free of geography or other unsupported content`,
       );
     }
 

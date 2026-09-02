@@ -35,6 +35,9 @@ const INVALID_FIXTURES = [
   ["de-0008-invalid-site-identity-geography-conflation.json", "site-identity-geography-conflation"],
   ["de-0008-invalid-site-identity-geography-conflation-metro.json", "site-identity-geography-conflation"],
   ["de-0008-invalid-unsupported-ambiguity.json", "unsupported-ambiguity"],
+  ["de-0008-invalid-unrecognized-origin-token.json", "unrecognized-identity-token"],
+  ["de-0008-invalid-unrecognized-niche-token.json", "unrecognized-identity-token"],
+  ["de-0008-invalid-unrecognized-site-token.json", "unrecognized-identity-token"],
 ];
 
 describe("de-0008-niche-site-registry.valid.json", () => {
@@ -90,6 +93,41 @@ describe("geography and niche/site identity independence", () => {
     const fixture = await loadFixture("de-0008-invalid-geography-embedded-niche-united-states.json");
     const errors = validateNicheSiteRegistry(fixture);
     expect(errors.some((message) => message.startsWith("geography-embedded-niche:"))).toBe(true);
+  });
+});
+
+describe("allowlist-backed fail-closed coverage beyond the curated geography lists", () => {
+  it("rejects a Denver-style niche/site identity on both the niche_id and site_id fields", async () => {
+    const fixture = await loadFixture("de-0008-invalid-geography-embedded-niche-metro.json");
+    const errors = validateNicheSiteRegistry(fixture);
+    expect(errors.some((message) => message.startsWith("geography-embedded-niche:"))).toBe(true);
+    expect(
+      errors.some((message) => message.startsWith("unrecognized-identity-token:") && message.includes("site_id")),
+    ).toBe(true);
+  });
+
+  it("rejects an origin apex domain embedding a city name absent from the curated metro list (aurora)", async () => {
+    const fixture = await loadFixture("de-0008-invalid-unrecognized-origin-token.json");
+    const errors = validateNicheSiteRegistry(fixture);
+    expect(
+      errors.some((message) => message.startsWith("unrecognized-identity-token:") && message.includes("origin")),
+    ).toBe(true);
+  });
+
+  it("rejects a niche_id embedding a city name absent from the curated metro list (aurora)", async () => {
+    const fixture = await loadFixture("de-0008-invalid-unrecognized-niche-token.json");
+    const errors = validateNicheSiteRegistry(fixture);
+    expect(
+      errors.some((message) => message.startsWith("unrecognized-identity-token:") && message.includes("niche_id")),
+    ).toBe(true);
+  });
+
+  it("rejects a geography term concatenated (no hyphen) into site_id (denverplumbingfinder)", async () => {
+    const fixture = await loadFixture("de-0008-invalid-unrecognized-site-token.json");
+    const errors = validateNicheSiteRegistry(fixture);
+    expect(
+      errors.some((message) => message.startsWith("unrecognized-identity-token:") && message.includes("site_id")),
+    ).toBe(true);
   });
 });
 

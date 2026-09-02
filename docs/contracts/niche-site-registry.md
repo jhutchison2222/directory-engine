@@ -71,23 +71,47 @@ wildcard:
 ## Geography and site/niche identity independence
 
 Per ADR-001, geography and service taxonomy remain independent dimensions.
-This registry extends that separation to site, niche, and origin identity.
-Geography and metro terms are detected as a contiguous run of
-hyphen-separated tokens within a kebab-case slug (so a multi-token reserved
-phrase such as `united-states` is caught even inside `united-states-plumbers`,
-not just as a single exact token), matched against every US state name, the
-District of Columbia, a deliberately curated (non-exhaustive) list of major
-US metro/city names such as `denver`, and the bare keywords `metro`, `us`,
-`usa`, and `united-states`:
+This registry extends that separation to site, niche, and origin identity,
+using two layers:
 
-- A `niche_id` that embeds one of these terms (for example,
-  `colorado-water-heater-repair` or `denver-plumbers`) is a
-  **geography-embedded-niche** violation — the niche's identity is a service
-  category, not a place.
-- A `site_id` that embeds one of these terms (for example,
-  `water-heater-repair-colorado` or `plumbers-denver`) is a
-  **site-identity-geography-conflation** violation — the site's canonical
-  identity must stay nationwide, not scoped to a place.
+1. **Diagnostic geography-term matching.** Geography and metro terms are
+   detected as a contiguous run of hyphen-separated tokens within a
+   kebab-case slug (so a multi-token reserved phrase such as `united-states`
+   is caught even inside `united-states-plumbers`, not just as a single exact
+   token), matched against every US state name, the District of Columbia, a
+   deliberately curated (non-exhaustive) list of major US metro/city names
+   such as `denver`, and the bare keywords `metro`, `us`, `usa`, and
+   `united-states`. This layer exists to give a clear, specific violation
+   category for the terms it happens to recognize, but a hyphen-token
+   blocklist of city/metro names can never be nationwide-complete — it cannot
+   know about every US place name (for example `aurora`), and it cannot see a
+   geography term concatenated without a hyphen into an otherwise
+   schema-valid identifier (for example `denverplumbingfinder`). It is not,
+   by itself, the authoritative fail-closed mechanism:
+   - A `niche_id` that embeds one of these terms (for example,
+     `colorado-water-heater-repair` or `denver-plumbers`) is a
+     **geography-embedded-niche** violation.
+   - A `site_id` that embeds one of these terms (for example,
+     `water-heater-repair-colorado` or `plumbers-denver`) is a
+     **site-identity-geography-conflation** violation.
+   - An origin domain label that embeds one of these terms (for example,
+     `denver-plumbers.com`) is a **metro-specific-origin** violation.
+
+2. **Allowlist-backed fail-closed backstop.** `niche_id`, `site_id`, and each
+   origin's registrable domain label are also checked against an explicit,
+   contract-declared allowlist of recognized service-taxonomy and
+   site-naming word roots (`RECOGNIZED_IDENTITY_TOKENS` in
+   `scripts/lib/validate-niche-site-registry.mjs`). An identity slug is
+   accepted only if it can be fully decomposed (after removing hyphens) into
+   a concatenation of tokens drawn from that allowlist; any leftover
+   characters that cannot be attributed to a recognized token are an
+   **unrecognized-identity-token** violation — regardless of whether that
+   leftover text happens to be a known geography term. This is what makes
+   the geography/identity separation deterministic and complete: unlike a
+   blocklist, an allowlist can be complete by construction, because anything
+   not explicitly recognized fails closed instead of being silently accepted.
+   Adding a new niche or site name to the registry is a deliberate,
+   reviewable extension of this allowlist, not a silent gap in coverage.
 
 ## Market-release coverage
 
@@ -119,9 +143,10 @@ validation alone cannot express the cross-record and cross-field rules above
 malformed-origin, origin-has-path, origin-has-query, origin-has-fragment,
 origin-has-credentials, origin-has-port, origin-has-wildcard,
 metro-specific-origin, geography-embedded-niche,
-site-identity-geography-conflation, and unsupported-ambiguity), so
-`scripts/lib/validate-niche-site-registry.mjs` implements those checks and
-fails closed — any violation is reported, not silently accepted.
+site-identity-geography-conflation, unrecognized-identity-token, and
+unsupported-ambiguity), so `scripts/lib/validate-niche-site-registry.mjs`
+implements those checks and fails closed — any violation is reported, not
+silently accepted.
 `scripts/lib/schema-fail-closed.mjs` implements the recursive
 `additionalProperties: false` check that `check:governance` runs against
 this schema.
@@ -136,8 +161,16 @@ origin, a Denver-style `niche_id`/`site_id`, and the multi-token
 `united-states` phrase within the `metro-specific-origin`,
 `geography-embedded-niche`, and `site-identity-geography-conflation`
 categories), plus `de-0008-invalid-country-not-us.json` for the internal
-country identity requirement and
+country identity requirement,
 `de-0008-invalid-unsupported-root-property.json` /
 `de-0008-invalid-unsupported-nested-property.json` proving the recursive
 `additionalProperties: false` schema constraint rejects an undeclared field
-at the document root and inside a nested object, respectively.
+at the document root and inside a nested object, respectively, and
+`de-0008-invalid-unrecognized-origin-token.json` /
+`de-0008-invalid-unrecognized-niche-token.json` /
+`de-0008-invalid-unrecognized-site-token.json` proving the allowlist-backed
+`unrecognized-identity-token` backstop rejects a city name absent from the
+curated metro list (`aurora`) in an origin apex domain and in a `niche_id`,
+and rejects a geography term concatenated without a hyphen into a `site_id`
+(`denverplumbingfinder`), independent of the diagnostic geography-term
+matching layer.
