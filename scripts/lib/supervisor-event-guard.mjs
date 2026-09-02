@@ -34,6 +34,40 @@ const SUPERVISED_WORKFLOW_RUN_NAMES = new Set(["Project governance", "Claude Cod
  * comments or label changes (recursion prevention). */
 const SELF_OR_RECURSIVE_ACTOR_PATTERN = /claude|autonomy-supervisor/i;
 
+/** GitHub identities that must never bypass the bot-actor recursion guard,
+ * regardless of any injected trusted-identity configuration. This is a
+ * hardcoded exclusion (never overridable via `trustedBotLogins`) so that a
+ * misconfigured or overly broad trusted-login list could never re-enable
+ * recursion against the supervisor's own `GITHUB_TOKEN`-authored dispatch
+ * markers and label changes. */
+const NEVER_TRUSTED_BOT_LOGINS = new Set(["github-actions[bot]"]);
+
+function isExplicitlyTrustedBotLogin(senderLogin, trustedBotLogins) {
+  if (typeof senderLogin !== "string" || senderLogin.length === 0) return false;
+  const normalized = senderLogin.toLowerCase();
+  if (NEVER_TRUSTED_BOT_LOGINS.has(normalized)) return false;
+  return (trustedBotLogins ?? []).some(
+    (login) => typeof login === "string" && login.toLowerCase() === normalized,
+  );
+}
+
+/**
+ * DE-0010 cycle 3/3: a prior version rejected *every* non-`workflow_run`
+ * event whose sender type was `Bot`, which is the correct default for
+ * recursion prevention (the supervisor's own `github-actions[bot]` marker
+ * posts, dependabot, etc.) but also silently discarded a review or comment
+ * posted by a specifically trusted reviewer/agent identity - GitHub App and
+ * bot-type integration accounts post as sender type `Bot` too, so the fast
+ * event-driven path never fired for exactly the kind of evidence
+ * (independent review/handoff) it exists to react to quickly; only the
+ * five-minute schedule ever picked it up. `trustedBotLogins` is an
+ * explicit, injectable allowlist the caller supplies from a fixed reviewed
+ * configuration or verified environment (e.g. an environment variable set
+ * by the workflow) - never from issue/PR content - and defaults to empty,
+ * so behavior is unchanged (every bot actor is still rejected) until a
+ * caller explicitly configures one. `NEVER_TRUSTED_BOT_LOGINS` always wins
+ * over this allowlist.
+ */
 export function shouldHandleEvent({
   eventName,
   payloadAvailable = true,
@@ -45,6 +79,7 @@ export function shouldHandleEvent({
   isPullRequestComment = false,
   labels = [],
   workflowName,
+  trustedBotLogins = [],
 } = {}) {
   if (eventName === "schedule" || eventName === "workflow_dispatch") {
     return { handle: true, reason: eventName };
@@ -69,8 +104,14 @@ export function shouldHandleEvent({
   // human or bot posting new content, so the generic bot check does not apply
   // to it; every other event type ignores bot-authored activity to prevent
   // recursion against the supervisor's own GITHUB_TOKEN-authored comments and
-  // labels, and against unrelated bot noise (e.g. dependabot).
-  if (eventName !== "workflow_run" && senderType === "Bot") {
+  // labels, and against unrelated bot noise (e.g. dependabot) - unless the
+  // sender is on the caller-supplied trusted-bot allowlist (never
+  // github-actions[bot], see NEVER_TRUSTED_BOT_LOGINS).
+  if (
+    eventName !== "workflow_run" &&
+    senderType === "Bot" &&
+    !isExplicitlyTrustedBotLogin(senderLogin, trustedBotLogins)
+  ) {
     return { handle: false, reason: "bot_actor" };
   }
 

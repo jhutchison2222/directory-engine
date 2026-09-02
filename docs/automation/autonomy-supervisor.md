@@ -46,13 +46,16 @@ itself.
   `scripts/lib/supervisor-event-guard.mjs` before any credential is read or
   any dispatch is attempted: a missing or unreadable event payload fails
   closed immediately (only the schedule/manual paths may proceed without
-  one), then repository match, actor (never a Claude-associated or generic
-  bot actor, preventing recursion against the supervisor's own
-  comments/labels), the event's own action filter, the comment-scope filter,
-  and the workflow-name filter. All triggers - schedule, manual, and
-  event-driven - share one non-overlapping concurrency group and compute the
-  identical deterministic idempotency key for identical state, so no
-  combination of them can duplicate a dispatch.
+  one), then repository match, actor (never a Claude-associated actor, and
+  never a generic bot actor - preventing recursion against the supervisor's
+  own comments/labels - unless the sender is on an explicit, injectable
+  trusted-bot-login allowlist supplied from a fixed reviewed configuration
+  or verified environment, never issue/PR content; `github-actions[bot]` can
+  never be on that allowlist regardless of configuration), the event's own
+  action filter, the comment-scope filter, and the workflow-name filter. All
+  triggers - schedule, manual, and event-driven - share one non-overlapping
+  concurrency group and compute the identical deterministic idempotency key
+  for identical state, so no combination of them can duplicate a dispatch.
 
   This is an additive fast path only; the five-minute schedule remains the
   recovery backstop regardless of webhook delivery.
@@ -65,8 +68,13 @@ itself.
 
 `.github/workflows/autonomy-supervisor.yml` requests exactly:
 
-- `actions: read` - to observe CI state.
-- `checks: read` - to read exact-head check-run conclusions.
+- `actions: read` - to read exact-head governance evidence from the Actions
+  workflow-runs API (`/actions/runs?head_sha=...`).
+- `checks: read` - part of the already-reviewed least-privilege permission
+  set; not currently used by the script (see the workflow-run vs. check-run
+  note below), and retained rather than removed here since editing the
+  workflow file's permissions is out of scope for a code/tests/docs-only
+  remediation cycle.
 - `contents: read` - to check out the repository (no write path).
 - `issues: write` - to post dispatch-bookkeeping comments and apply
   `autonomy-blocked` on issues and pull requests (both are the Issues API).
@@ -90,17 +98,22 @@ under `scripts/lib/`:
 
 - `supervisor-policy.mjs` - exact-head/exact-state evaluation for pull
   requests and issues, hold labels, the bounded remediation-cycle retry-
-  attempt cap, retry timing, and queued-task selection.
+  attempt cap, retry timing, and queued-task selection (`selectQueuedTasks`
+  surfaces the first eligible queued issue's decision - including `hold` and
+  `blocked`, not only `dispatch` - so a held or retry-exhausted issue is
+  visible and, once blocked, actually receives `autonomy-blocked` instead of
+  being silently passed over).
 - `supervisor-verdicts.mjs` - owner-only exact-head acceptance chronology:
   classifying owner-authored comments/reviews into ACCEPTED / REJECTED /
   SUPERSEDED / REMEDIATION_REQUESTED verdicts and resolving the
   chronologically latest one at an exact head (the PR #24 stale-verdict race
   guard).
 - `supervisor-ci.mjs` - governance CI evidence: requires a completed,
-  successful, exactly-named `Project governance` run at the exact head;
-  nothing else (an unrelated green check, this repository's own
-  pre-merge-inoperable `Autonomous supervisor` job, or a stale-head run)
-  ever counts.
+  successful GitHub Actions **workflow run** literally named `Project
+  governance` at the exact head; nothing else (an unrelated green check, a
+  job-level check-run name such as this repository's own governance job
+  `verify`, this repository's own pre-merge-inoperable `Autonomous
+  supervisor` job, or a stale-head run) ever counts.
 - `supervisor-idempotency.mjs` - deterministic idempotency keys, the hidden
   HTML-comment dispatch marker used as the duplicate-suppression ledger (the
   workflow has no `contents: write`, so it cannot persist a ledger file; it
@@ -186,6 +199,24 @@ deliberately excluded from this shared cap: it is governed independently by
 its own idempotency key and the same 30-minute retry interval only, so a
 merge-ready subject is never blocked by remediation-cycle exhaustion.
 
+A dispatch marker is posted for **every** attempted dispatch, not only a
+successful one: a non-`202` response or a thrown error (e.g. the dispatch
+endpoint refusing a redirect, or a network failure) is recorded with outcome
+`failed` (see `DISPATCH_OUTCOMES` in `supervisor-idempotency.mjs`) and counts
+toward both the 30-minute retry interval and the remediation attempt budget
+exactly like a successful dispatch. A prior version only recorded a
+successful dispatch, so a persistently failing endpoint was retried on every
+five-minute tick forever, with no spacing and no cap.
+
+For queued issues, `selectQueuedTasks` surfaces the first eligible issue's
+decision even when it is `hold` or `blocked`, not only `dispatch` - a prior
+version filtered to `dispatch` before the caller ever saw the result, so an
+issue that had exhausted its attempt budget never reached the code path that
+applies `autonomy-blocked`, unlike pull requests (which are always evaluated
+and applied). Because at most one queued issue is surfaced per cycle, a
+held or blocked issue at the front of the ascending-number queue is reported
+instead of silently passed over to start a new task underneath it.
+
 ### Trusted dispatch-marker authorship
 
 A prior version parsed a dispatch marker out of *any* issue/PR comment with
@@ -195,7 +226,10 @@ future `dispatchedAt` and silence the supervisor for that subject
 indefinitely. `filterTrustedDispatchMarkers` in `supervisor-idempotency.mjs`
 now counts a marker only when the comment is authored by the exact trusted
 identity (`github-actions[bot]`, type `Bot`) the supervisor itself posts as;
-an identical, well-formed marker forged by any other author is discarded.
+an identical, well-formed marker forged by any other author is discarded. A
+marker is posted for every attempted dispatch (see "Bounded retries" above),
+tagged with an `outcome` of `dispatched` or `failed`; `outcome` is optional
+on parse so a marker posted before this field existed still round-trips.
 
 ### Active-pull-request precedence
 
@@ -277,7 +311,20 @@ review of PR #26):
   in `supervisor-event-guard.mjs` lists `"Project governance"` and
   `"Claude Code"` as placeholders for the governance/Claude workflow names
   this supervisor depends on; confirm these match the actual `name:` fields
-  once the workflow is live.
+  once the workflow is live. (`"Project governance"` is confirmed correct
+  against this repository's actual `.github/workflows/project-governance.yml`
+  `name:` field; `"Claude Code"` remains unconfirmed.)
+- **The trusted-bot-login allowlist is unset by default.** `shouldHandleEvent`
+  now accepts an injectable `trustedBotLogins` allowlist so a specifically
+  trusted reviewer/agent identity (e.g. a GitHub App-backed Workspace Agent,
+  which posts as sender type `Bot`) can trigger the event-driven fast path
+  without weakening the generic bot-recursion guard. The wiring reads it from
+  the optional, comma-separated `AUTONOMY_TRUSTED_BOT_LOGINS` environment
+  variable, which is not yet set anywhere - until the dedicated Workspace Agent's literal GitHub
+  login is independently confirmed, no bot identity beyond the hardcoded
+  `github-actions[bot]` exclusion is trusted, and the event-driven path falls
+  back to the five-minute schedule for that evidence, exactly as before this
+  change.
 - **Bootstrap:** `.github/workflows/autonomy-supervisor.yml` itself cannot
   successfully invoke `scripts/run-autonomy-supervisor.mjs` against `main`
   until this pull request merges (the script does not exist on `main` yet).
@@ -292,7 +339,10 @@ review of PR #26):
 cycle - scheduled and manual evaluation, one Workspace Agent wake-up, fresh
 exact-head re-read after a new commit, active-pull-request precedence over a
 queued task, the PR #24 stale-verdict race, the remediation-cycle attempt cap
-spanning equivalent reasons and the resulting `autonomy-blocked` hold,
+spanning equivalent reasons and the resulting `autonomy-blocked` hold, a
+persistently failing dispatch endpoint (non-`202` and thrown-error attempts)
+being spaced and capped exactly like a succeeding one, a retry-exhausted
+queued issue receiving `autonomy-blocked` the same way a pull request does,
 simultaneous schedule/event-driven dedupe, forged dispatch-marker rejection,
 per-item failure isolation, and duplicate suppression - entirely in memory,
 with a fake GitHub store and a call-counting fake Workspace Agent dispatcher.

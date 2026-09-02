@@ -452,4 +452,50 @@ describe("selectQueuedTasks: deterministic ordering and bounded selection", () =
     ];
     expect(selectQueuedTasks(items, NOW, { limit: 1 }).map((entry) => entry.issue.number)).toEqual([1]);
   });
+
+  it("DE-0010 item 3 regression: surfaces a held queued issue's decision instead of silently discarding it, without starting the next issue this cycle", () => {
+    // The default limit (1, as supervisor-run.mjs always calls this with) is
+    // what actually matters here: production never asks for more than one
+    // queued item per cycle, so the held issue at the front of the queue
+    // must occupy that single slot rather than being skipped past.
+    const items = [
+      { issue: { number: 5, labels: [AUTONOMY_READY_LABEL, "major-decision"] }, dispatches: [] },
+      { issue: { number: 10, labels: [AUTONOMY_READY_LABEL] }, dispatches: [] },
+    ];
+    const selected = selectQueuedTasks(items, NOW);
+    expect(selected).toHaveLength(1);
+    expect(selected[0].issue.number).toBe(5);
+    expect(selected[0].decision).toEqual({ action: "hold", reason: "major-decision" });
+  });
+
+  it("DE-0010 item 3 regression: surfaces a retry-exhausted queued issue as blocked, without starting a new task underneath it", () => {
+    const issue = { number: 6, labels: [AUTONOMY_READY_LABEL], title: "t", body: "b" };
+    const key = buildIdempotencyKey({
+      subjectType: "issue",
+      subjectNumber: 6,
+      stateId: computeIssueStateFingerprint(issue),
+      reason: REASONS.QUEUED_TASK_START,
+    });
+    const dispatches = Array.from({ length: MAX_DISPATCH_ATTEMPTS_PER_KEY }, (_, i) => ({
+      key,
+      dispatchedAt: new Date(NOW.getTime() - RETRY_INTERVAL_MS * (MAX_DISPATCH_ATTEMPTS_PER_KEY - i)).toISOString(),
+    }));
+    const items = [
+      { issue, dispatches },
+      { issue: { number: 7, labels: [AUTONOMY_READY_LABEL] }, dispatches: [] },
+    ];
+    const selected = selectQueuedTasks(items, NOW, { limit: 1 });
+    expect(selected).toHaveLength(1);
+    expect(selected[0].issue.number).toBe(6);
+    expect(selected[0].decision).toEqual({ action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey: key });
+  });
+
+  it("still skips past a bare skip decision (not opted in, or retry not due) to find eligible work", () => {
+    const items = [
+      { issue: { number: 1, labels: [] }, dispatches: [] }, // not_autonomy_ready
+      { issue: { number: 2, labels: [AUTONOMY_READY_LABEL] }, dispatches: [] }, // dispatch
+    ];
+    const selected = selectQueuedTasks(items, NOW, { limit: 5 });
+    expect(selected.map((entry) => entry.issue.number)).toEqual([2]);
+  });
 });

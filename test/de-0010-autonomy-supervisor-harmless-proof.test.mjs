@@ -16,12 +16,13 @@ const BOT_AUTHOR = { login: "github-actions[bot]", type: "Bot" };
  * re-read, the retry-attempt cap, and the AUTONOMY_BLOCKED_LABEL hold, all
  * without any network access or credential material.
  */
-function createFakeGitHub() {
+function createFakeGitHub({ dispatch } = {}) {
   const pullRequests = new Map();
   const issues = new Map();
   const comments = new Map(); // subjectNumber -> [{ body }]
   const labels = new Map(); // subjectNumber -> Set<string>
   const dispatchCalls = [];
+  const performDispatch = dispatch ?? (async () => ({ ok: true, status: 202 }));
 
   function commentsFor(number) {
     if (!comments.has(number)) comments.set(number, []);
@@ -60,7 +61,7 @@ function createFakeGitHub() {
       },
       async dispatchToWorkspaceAgent({ idempotencyKey, reason, subject }) {
         dispatchCalls.push({ idempotencyKey, reason, subject });
-        return { ok: true, status: 202 };
+        return performDispatch({ idempotencyKey, reason, subject });
       },
     };
   }
@@ -429,5 +430,82 @@ describe("DE-0010 harmless end-to-end proof", () => {
 
     expect(github.dispatchCalls).toHaveLength(0);
     expect(results).toEqual([]);
+  });
+
+  it("DE-0010 item 1 regression: persists every failed dispatch attempt (non-202 and thrown) so retries are spaced and capped", async () => {
+    let callCount = 0;
+    const github = createFakeGitHub({
+      dispatch: async () => {
+        callCount += 1;
+        if (callCount === 2) throw new Error("simulated network failure");
+        return { ok: false, status: 500 };
+      },
+    });
+    const HEAD_A = "a".repeat(40);
+    const t0 = new Date("2026-09-02T12:00:00Z");
+
+    github.pullRequests.set(600, {
+      number: 600,
+      headSha: HEAD_A,
+      isDraft: false,
+      labels: [],
+      checks: { headSha: HEAD_A, conclusion: "failure" },
+      ownerVerdictEvents: [],
+    });
+
+    // Attempt 1: a non-202 response.
+    let results = await runAutonomySupervisor(github.makeDeps(t0));
+    expect(results[0].status).toBe("dispatch_failed");
+    expect(github.dispatchCalls).toHaveLength(1);
+
+    // An immediate re-evaluation (e.g. the very next five-minute tick) must
+    // not re-dispatch: the failed attempt is recorded and counts toward
+    // retry spacing exactly like a successful one would have.
+    const t1 = new Date(t0.getTime() + 5 * 60 * 1000);
+    results = await runAutonomySupervisor(github.makeDeps(t1));
+    expect(results[0].status).toBe("skip");
+    expect(results[0].reason).toBe("retry_not_due");
+    expect(github.dispatchCalls).toHaveLength(1);
+
+    // Attempt 2, after the retry interval: the dispatcher throws (a network
+    // failure) instead of returning a non-202 status - this must also be
+    // recorded and spaced identically.
+    const t2 = new Date(t1.getTime() + RETRY_INTERVAL_MS + 1);
+    results = await runAutonomySupervisor(github.makeDeps(t2));
+    expect(results[0].status).toBe("dispatch_failed");
+    expect(github.dispatchCalls).toHaveLength(2);
+
+    // Attempt 3, one more retry interval later.
+    const t3 = new Date(t2.getTime() + RETRY_INTERVAL_MS + 1);
+    results = await runAutonomySupervisor(github.makeDeps(t3));
+    expect(results[0].status).toBe("dispatch_failed");
+    expect(github.dispatchCalls).toHaveLength(3);
+
+    // A fourth evaluation at the same exact head blocks instead of a fourth
+    // attempt, even though every prior attempt failed rather than succeeded.
+    const t4 = new Date(t3.getTime() + RETRY_INTERVAL_MS + 1);
+    results = await runAutonomySupervisor(github.makeDeps(t4));
+    expect(results[0].status).toBe("blocked");
+    expect(github.dispatchCalls).toHaveLength(3);
+    expect(github.labelsFor(600).has(AUTONOMY_BLOCKED_LABEL)).toBe(true);
+  });
+
+  it("DE-0010 item 3 regression: blocks a retry-exhausted queued issue and applies AUTONOMY_BLOCKED_LABEL, matching the pull-request path", async () => {
+    const github = createFakeGitHub();
+    const t0 = new Date("2026-09-02T12:00:00Z");
+    github.issues.set(700, { number: 700, labels: ["autonomy-ready"], title: "queued task", body: "do work" });
+
+    let now = t0;
+    for (let attempt = 0; attempt < MAX_DISPATCH_ATTEMPTS_PER_KEY; attempt += 1) {
+      const results = await runAutonomySupervisor(github.makeDeps(now));
+      expect(results[0].status).toBe("dispatched");
+      now = new Date(now.getTime() + RETRY_INTERVAL_MS + 1);
+    }
+    expect(github.dispatchCalls).toHaveLength(MAX_DISPATCH_ATTEMPTS_PER_KEY);
+
+    const blockedResults = await runAutonomySupervisor(github.makeDeps(now));
+    expect(github.dispatchCalls).toHaveLength(MAX_DISPATCH_ATTEMPTS_PER_KEY);
+    expect(blockedResults[0].status).toBe("blocked");
+    expect(github.labelsFor(700).has(AUTONOMY_BLOCKED_LABEL)).toBe(true);
   });
 });

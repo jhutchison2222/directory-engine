@@ -129,8 +129,8 @@ export function computeIssueStateFingerprint(issue) {
  * older head is stale and is treated as absent, forcing a fresh evaluation.
  *
  * `pr.checks` is `{ headSha, conclusion: "success" | "failure" | "pending" }
- *   | null` and must already be scoped to the named governance CI check by
- * the caller (see summarizeGovernanceCheckRuns in supervisor-ci.mjs).
+ *   | null` and must already be scoped to the named governance workflow run
+ * by the caller (see summarizeGovernanceWorkflowRuns in supervisor-ci.mjs).
  * `pr.ownerVerdictEvents` is an array of owner-authored verdict events (see
  * buildOwnerVerdictEvents in supervisor-verdicts.mjs) and must already have
  * every non-owner-authored comment/review filtered out by the caller; the
@@ -228,15 +228,35 @@ export function evaluateIssueAction(issue, now, dispatches = []) {
 }
 
 /**
- * Selects at most `limit` queued issues to dispatch this cycle, in
- * deterministic ascending-issue-number order. Callers are expected to only
- * invoke this when no active pull request needs dispatch this cycle (active
- * pull requests take precedence over starting new queued work).
+ * Selects at most `limit` queued issues to surface to the orchestrator this
+ * cycle, in deterministic ascending-issue-number order. Callers are expected
+ * to only invoke this when no active pull request needs dispatch this cycle
+ * (active pull requests take precedence over starting new queued work).
+ *
+ * DE-0010 cycle 3/3: a prior version filtered to `decision.action ===
+ * "dispatch"` before sorting, so an issue that was held (a hold label) or had
+ * exhausted its retry-attempt budget ("blocked") was silently discarded -
+ * `applyDecision`'s blocked branch (which applies AUTONOMY_BLOCKED_LABEL) was
+ * therefore unreachable for issues, unlike pull requests, which are always
+ * evaluated and applied. This now returns the first `limit` issues, in
+ * ascending order, whose decision is anything other than "skip" (a bare
+ * `not_autonomy_ready` or `retry_not_due` decision has nothing to report and
+ * is passed over so the next eligible issue can be considered) - including
+ * "hold" and "blocked" - so a held or blocked issue is visible and, for
+ * "blocked", actually receives its label. Because this still stops at
+ * `limit`, a held/blocked issue at the front of the queue is reported instead
+ * of silently skipped past to start a new task underneath it.
  */
 export function selectQueuedTasks(itemsWithDispatches, now, { limit = 1 } = {}) {
-  return itemsWithDispatches
+  const decided = itemsWithDispatches
     .map(({ issue, dispatches }) => ({ issue, decision: evaluateIssueAction(issue, now, dispatches) }))
-    .filter(({ decision }) => decision.action === "dispatch")
-    .sort((a, b) => a.issue.number - b.issue.number)
-    .slice(0, limit);
+    .sort((a, b) => a.issue.number - b.issue.number);
+
+  const selected = [];
+  for (const item of decided) {
+    if (item.decision.action === "skip") continue;
+    selected.push(item);
+    if (selected.length >= limit) break;
+  }
+  return selected;
 }

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { runAutonomySupervisor } from "./lib/supervisor-run.mjs";
-import { summarizeGovernanceCheckRuns } from "./lib/supervisor-ci.mjs";
+import { summarizeGovernanceWorkflowRuns } from "./lib/supervisor-ci.mjs";
 import { buildOwnerVerdictEvents } from "./lib/supervisor-verdicts.mjs";
 import { filterTrustedDispatchMarkers } from "./lib/supervisor-idempotency.mjs";
 import { shouldHandleEvent } from "./lib/supervisor-event-guard.mjs";
@@ -77,8 +77,16 @@ async function githubPaginated(token, initialUrl, extractItems) {
   return items;
 }
 
-function normalizeCheckRun(run) {
-  return { name: run.name, status: run.status, conclusion: run.conclusion, startedAt: run.started_at };
+/**
+ * Normalizes one GitHub Actions **workflow run** (from `/actions/runs`, not
+ * a check-run) into the plain shape `summarizeGovernanceWorkflowRuns`
+ * expects. A workflow run's own `name` is the workflow's top-level `name:`
+ * field (e.g. "Project governance") - unlike a check-run's `name`, which is
+ * the job name (e.g. "verify") and can never match the governance workflow
+ * name.
+ */
+function normalizeWorkflowRun(run) {
+  return { name: run.name, status: run.status, conclusion: run.conclusion, startedAt: run.run_started_at ?? run.created_at };
 }
 
 function buildReviewsForVerdicts(reviews) {
@@ -114,11 +122,11 @@ function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
       const snapshots = [];
       for (const pull of pulls) {
         const headSha = pull.head.sha;
-        const [checkRuns, reviews, comments] = await Promise.all([
+        const [workflowRuns, reviews, comments] = await Promise.all([
           githubPaginated(
             token,
-            `${GITHUB_API}/repos/${owner}/${repo}/commits/${headSha}/check-runs?per_page=100`,
-            (page) => page.check_runs ?? [],
+            `${GITHUB_API}/repos/${owner}/${repo}/actions/runs?head_sha=${headSha}&per_page=100`,
+            (page) => page.workflow_runs ?? [],
           ),
           githubPaginated(
             token,
@@ -136,7 +144,7 @@ function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
           headSha,
           isDraft: pull.draft === true,
           labels: (pull.labels ?? []).map((label) => label.name),
-          checks: summarizeGovernanceCheckRuns(checkRuns.map(normalizeCheckRun), headSha),
+          checks: summarizeGovernanceWorkflowRuns(workflowRuns.map(normalizeWorkflowRun), headSha),
           ownerVerdictEvents: buildOwnerVerdictEvents({
             ownerLogin,
             comments: buildCommentsForVerdicts(comments),
@@ -205,6 +213,26 @@ function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
 }
 
 /**
+ * Parses the fixed, reviewed, non-secret environment variable naming any
+ * GitHub bot identity trusted to bypass the generic bot-actor recursion
+ * guard (see NEVER_TRUSTED_BOT_LOGINS in supervisor-event-guard.mjs, which
+ * still always rejects github-actions[bot] regardless of this value). This
+ * is read from the process environment only - never from issue/PR content,
+ * a label, or any other repository-controlled text - and is optional: if
+ * unset, no bot identity beyond the hardcoded exclusions is trusted, which
+ * is the current state until the dedicated Workspace Agent's own GitHub
+ * login is independently confirmed (see the Open Items in
+ * docs/automation/autonomy-supervisor.md).
+ */
+function parseTrustedBotLogins(rawValue) {
+  if (typeof rawValue !== "string") return [];
+  return rawValue
+    .split(",")
+    .map((login) => login.trim())
+    .filter((login) => login.length > 0);
+}
+
+/**
  * Decides, from the raw GitHub Actions event context, whether this
  * invocation should proceed to a full evaluation cycle at all. `schedule`
  * and `workflow_dispatch` always proceed (the recovery backstop and manual
@@ -246,6 +274,7 @@ function decideWhetherToHandleThisEvent() {
     isPullRequestComment: Boolean(payload?.issue?.pull_request),
     labels: (payload?.issue?.labels ?? []).map((label) => (typeof label === "string" ? label : label.name)),
     workflowName: payload?.workflow_run?.name,
+    trustedBotLogins: parseTrustedBotLogins(process.env.AUTONOMY_TRUSTED_BOT_LOGINS),
   });
 }
 

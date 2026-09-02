@@ -5,6 +5,17 @@ const REASON_PATTERN = /^[a-z][a-z0-9_]*$/;
 const MARKER_PREFIX = "<!-- autonomy-supervisor:";
 const MARKER_SUFFIX = " -->";
 
+/** The two outcomes a dispatch attempt can record. DE-0010 cycle 3/3: a prior
+ * version only ever posted a marker after a *successful* dispatch, so a
+ * failing Workspace Agent endpoint (a non-202 response, or a thrown network
+ * error) left no evidence at all - the five-minute schedule would then retry
+ * immediately and indefinitely, bypassing both retry spacing and the
+ * shared remediation attempt budget. A marker is now posted for every
+ * attempted dispatch, tagged with which of these two outcomes it was;
+ * `outcome` is optional on parse for backward compatibility with a marker
+ * posted before this field existed. */
+export const DISPATCH_OUTCOMES = Object.freeze({ DISPATCHED: "dispatched", FAILED: "failed" });
+
 /**
  * Builds the deterministic exact-state/reason idempotency key that identifies
  * "this exact subject, in this exact reviewed state, for this exact reason".
@@ -96,21 +107,26 @@ export function filterTrustedDispatchMarkers(comments, trustedAuthor = {}) {
 
 /**
  * Renders the hidden HTML-comment bookkeeping marker posted to the subject's
- * comment thread after a successful dispatch. The marker never carries the
- * Workspace Agent token or any other credential material - only the
- * idempotency key and dispatch timestamp needed to detect duplicates.
+ * comment thread after every attempted dispatch, whether it succeeded or
+ * failed. The marker never carries the Workspace Agent token or any other
+ * credential material - only the idempotency key, dispatch timestamp, and
+ * (optionally) the outcome needed to detect duplicates and to count failed
+ * attempts toward retry spacing and the remediation attempt budget.
  */
-export function formatDispatchMarker({ key, dispatchedAt }) {
+export function formatDispatchMarker({ key, dispatchedAt, outcome }) {
   if (typeof key !== "string" || key.length === 0) {
     throw new Error("formatDispatchMarker: key is required");
   }
   if (Number.isNaN(Date.parse(dispatchedAt))) {
     throw new Error(`formatDispatchMarker: dispatchedAt "${dispatchedAt}" is not a parseable date-time`);
   }
-  const payload = JSON.stringify({ key, dispatchedAt });
+  if (outcome !== undefined && !Object.values(DISPATCH_OUTCOMES).includes(outcome)) {
+    throw new Error(`formatDispatchMarker: outcome "${outcome}" must be one of ${Object.values(DISPATCH_OUTCOMES).join(", ")}`);
+  }
+  const payload = JSON.stringify(outcome === undefined ? { key, dispatchedAt } : { key, dispatchedAt, outcome });
   return (
     `${MARKER_PREFIX}${payload}${MARKER_SUFFIX}\n` +
-    "Autonomy supervisor dispatched the Workspace Agent for this exact-state evidence. " +
+    "Autonomy supervisor recorded a dispatch attempt for this exact-state evidence. " +
     "This marker records dispatch bookkeeping only; it is not a review, acceptance, or merge decision."
   );
 }
@@ -136,5 +152,9 @@ export function parseDispatchMarker(commentBody) {
   if (typeof parsed !== "object" || parsed === null) return null;
   if (typeof parsed.key !== "string" || parsed.key.length === 0) return null;
   if (typeof parsed.dispatchedAt !== "string" || Number.isNaN(Date.parse(parsed.dispatchedAt))) return null;
-  return { key: parsed.key, dispatchedAt: parsed.dispatchedAt };
+  const marker = { key: parsed.key, dispatchedAt: parsed.dispatchedAt };
+  if (typeof parsed.outcome === "string" && Object.values(DISPATCH_OUTCOMES).includes(parsed.outcome)) {
+    marker.outcome = parsed.outcome;
+  }
+  return marker;
 }

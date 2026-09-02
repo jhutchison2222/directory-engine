@@ -1,14 +1,25 @@
 import { AUTONOMY_BLOCKED_LABEL, evaluatePullRequestAction, selectQueuedTasks } from "./supervisor-policy.mjs";
-import { formatDispatchMarker } from "./supervisor-idempotency.mjs";
+import { DISPATCH_OUTCOMES, formatDispatchMarker } from "./supervisor-idempotency.mjs";
 
 /**
  * Applies one already-computed decision: dispatches to the Workspace Agent
- * and records the dispatch marker when the decision is "dispatch", applies
+ * and records a trusted dispatch marker for every attempted dispatch -
+ * success or failure - when the decision is "dispatch", applies
  * AUTONOMY_BLOCKED_LABEL when the decision is "blocked" (the exact-head/
  * reason retry cap was reached), otherwise just reports the skip/hold reason.
  * Isolated into its own function so a dispatch, labeling, or comment-posting
  * failure for one subject cannot be conflated with the decision logic
  * itself.
+ *
+ * DE-0010 cycle 3/3: a prior version only posted a marker after a
+ * *successful* dispatch. A non-202 response, or a thrown error (e.g. the
+ * dispatch endpoint refusing a redirect, or a network failure), left no
+ * evidence at all, so the five-minute schedule retried immediately and
+ * indefinitely for a persistently failing endpoint - bypassing both retry
+ * spacing (RETRY_INTERVAL_MS) and the shared remediation attempt budget
+ * (MAX_DISPATCH_ATTEMPTS_PER_KEY), both of which count every marker
+ * regardless of its outcome. A marker recording the outcome (never a
+ * credential) is now posted for every attempted dispatch.
  */
 async function applyDecision({ subjectType, number, headSha, decision, now, deps }) {
   if (decision.action === "blocked") {
@@ -20,18 +31,32 @@ async function applyDecision({ subjectType, number, headSha, decision, now, deps
     return { status: decision.action, reason: decision.reason, idempotencyKey: decision.idempotencyKey ?? null };
   }
 
-  const dispatchResult = await deps.dispatchToWorkspaceAgent({
-    idempotencyKey: decision.idempotencyKey,
-    reason: decision.reason,
-    subject: { type: subjectType, number, headSha: headSha ?? null },
+  let dispatchResult;
+  try {
+    dispatchResult = await deps.dispatchToWorkspaceAgent({
+      idempotencyKey: decision.idempotencyKey,
+      reason: decision.reason,
+      subject: { type: subjectType, number, headSha: headSha ?? null },
+    });
+  } catch {
+    // A thrown dispatch (e.g. the endpoint refusing a redirect, or a network
+    // failure) is still one attempted dispatch and must be recorded exactly
+    // like an ordinary non-202 response; dispatchToWorkspaceAgent never
+    // throws with the token in its message, and nothing about the error is
+    // persisted here.
+    dispatchResult = { ok: false };
+  }
+
+  const marker = formatDispatchMarker({
+    key: decision.idempotencyKey,
+    dispatchedAt: now.toISOString(),
+    outcome: dispatchResult.ok ? DISPATCH_OUTCOMES.DISPATCHED : DISPATCH_OUTCOMES.FAILED,
   });
+  await deps.postDispatchMarker(subjectType, number, marker);
 
   if (!dispatchResult.ok) {
     return { status: "dispatch_failed", reason: decision.reason, idempotencyKey: decision.idempotencyKey };
   }
-
-  const marker = formatDispatchMarker({ key: decision.idempotencyKey, dispatchedAt: now.toISOString() });
-  await deps.postDispatchMarker(subjectType, number, marker);
 
   return { status: "dispatched", reason: decision.reason, idempotencyKey: decision.idempotencyKey };
 }

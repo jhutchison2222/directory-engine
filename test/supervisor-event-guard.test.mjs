@@ -120,6 +120,75 @@ describe("shouldHandleEvent: self/bot recursion prevention", () => {
   });
 });
 
+describe("shouldHandleEvent: explicit trusted-bot-login allowance (DE-0010 item 2)", () => {
+  it("handles a review submitted by a specifically trusted bot-type reviewer/agent identity", () => {
+    const decision = shouldHandleEvent({
+      eventName: "pull_request_review",
+      action: "submitted",
+      repositoryFullName: REPO,
+      expectedRepositoryFullName: REPO,
+      senderLogin: "directory-engine-workspace-agent[bot]",
+      senderType: "Bot",
+      trustedBotLogins: ["directory-engine-workspace-agent[bot]"],
+    });
+    expect(decision).toEqual({ handle: true, reason: "pull_request_review_event" });
+  });
+
+  it("handles a comment on a pull request from a trusted bot login, matched case-insensitively", () => {
+    const decision = shouldHandleEvent({
+      eventName: "issue_comment",
+      action: "created",
+      repositoryFullName: REPO,
+      expectedRepositoryFullName: REPO,
+      senderLogin: "Directory-Engine-Workspace-Agent[bot]",
+      senderType: "Bot",
+      isPullRequestComment: true,
+      trustedBotLogins: ["directory-engine-workspace-agent[bot]"],
+    });
+    expect(decision).toEqual({ handle: true, reason: "issue_comment_event" });
+  });
+
+  it("still rejects github-actions[bot] even if a misconfigured trustedBotLogins list includes it", () => {
+    const decision = shouldHandleEvent({
+      eventName: "issue_comment",
+      action: "created",
+      repositoryFullName: REPO,
+      expectedRepositoryFullName: REPO,
+      senderLogin: "github-actions[bot]",
+      senderType: "Bot",
+      isPullRequestComment: true,
+      trustedBotLogins: ["github-actions[bot]"],
+    });
+    expect(decision).toEqual({ handle: false, reason: "bot_actor" });
+  });
+
+  it("still rejects an unrelated bot not on the trusted allowlist", () => {
+    const decision = shouldHandleEvent({
+      eventName: "issue_comment",
+      action: "created",
+      repositoryFullName: REPO,
+      expectedRepositoryFullName: REPO,
+      senderLogin: "dependabot[bot]",
+      senderType: "Bot",
+      isPullRequestComment: true,
+      trustedBotLogins: ["directory-engine-workspace-agent[bot]"],
+    });
+    expect(decision).toEqual({ handle: false, reason: "bot_actor" });
+  });
+
+  it("defaults to rejecting every bot actor when no trustedBotLogins is supplied (unchanged default behavior)", () => {
+    const decision = shouldHandleEvent({
+      eventName: "pull_request_review",
+      action: "submitted",
+      repositoryFullName: REPO,
+      expectedRepositoryFullName: REPO,
+      senderLogin: "directory-engine-workspace-agent[bot]",
+      senderType: "Bot",
+    });
+    expect(decision).toEqual({ handle: false, reason: "bot_actor" });
+  });
+});
+
 describe("shouldHandleEvent: pull_request", () => {
   const base = {
     eventName: "pull_request",

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN,
   DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE,
+  DISPATCH_OUTCOMES,
   buildIdempotencyKey,
   filterTrustedDispatchMarkers,
   formatDispatchMarker,
@@ -146,5 +147,44 @@ describe("dispatch marker round trip", () => {
 
   it("rejects building a marker with an unparseable dispatchedAt", () => {
     expect(() => formatDispatchMarker({ key: "k", dispatchedAt: "not-a-date" })).toThrow(/dispatchedAt/);
+  });
+});
+
+describe("dispatch marker outcome (DE-0010 item 1: persisting failed dispatch attempts)", () => {
+  it("round-trips a failed-attempt marker with its outcome", () => {
+    const marker = formatDispatchMarker({
+      key: "pull_request:26:abc:ci_failed",
+      dispatchedAt: "2026-09-02T00:00:00Z",
+      outcome: DISPATCH_OUTCOMES.FAILED,
+    });
+    expect(parseDispatchMarker(marker)).toEqual({
+      key: "pull_request:26:abc:ci_failed",
+      dispatchedAt: "2026-09-02T00:00:00Z",
+      outcome: "failed",
+    });
+  });
+
+  it("round-trips a successful-dispatch marker with its outcome", () => {
+    const marker = formatDispatchMarker({
+      key: "pull_request:26:abc:ci_failed",
+      dispatchedAt: "2026-09-02T00:00:00Z",
+      outcome: DISPATCH_OUTCOMES.DISPATCHED,
+    });
+    expect(parseDispatchMarker(marker)).toEqual({
+      key: "pull_request:26:abc:ci_failed",
+      dispatchedAt: "2026-09-02T00:00:00Z",
+      outcome: "dispatched",
+    });
+  });
+
+  it("rejects building a marker with an invalid outcome value", () => {
+    expect(() =>
+      formatDispatchMarker({ key: "k", dispatchedAt: "2026-09-02T00:00:00Z", outcome: "something-else" }),
+    ).toThrow(/outcome/);
+  });
+
+  it("ignores an unrecognized outcome value when parsing rather than trusting it", () => {
+    const forged = '<!-- autonomy-supervisor:{"key":"k","dispatchedAt":"2026-09-02T00:00:00Z","outcome":"forged"} -->';
+    expect(parseDispatchMarker(forged)).toEqual({ key: "k", dispatchedAt: "2026-09-02T00:00:00Z" });
   });
 });
