@@ -129,23 +129,23 @@ attributable for the observation:
     (empty or whitespace-only) value for either is a
     **missing-evidence-attribution** violation.
   - Neither `recorded_by` nor `citation` may embed credential or secret
-    material — URL userinfo (`user:pass@host` or a bare token-shaped
-    `<token>@host`), a raw vendor/access-key token (GitHub `ghp_`/`gho_`/
-    `ghu_`/`ghs_`/`ghr_`/`github_pat_`, OpenAI-style `sk-`, AWS `AKIA...`, or
-    Slack `xox...`), a `token=...` assignment, or another secret-bearing
-    keyword (for example `password`, `api_key`, a `Bearer` token, or
-    `-----BEGIN`). Any of these is an **evidence-reference-credential**
-    violation, since an evidence citation must never carry a live
-    credential. This detection is context-bound, not a bare substring
-    match: a dictionary word like `secret` or `password` must appear as its
-    own word (so "Colorado Secretary of State" is not flagged), `bearer`
-    only matches when followed by a token-shaped value (so "bearer of this
-    deed" is not flagged), an `authorization:` prefix only matches when
-    followed by the `Bearer` or `Basic` scheme (so "Authorization: city
-    clerk" is not flagged), and URL userinfo detection (whether
-    `user:pass@` or a bare token before `@`) is bounded to a URL's authority
-    component (so a colon/`@` pair inside a path, query string, or fragment
-    is not misread as embedded credentials).
+    material — URL userinfo (any non-empty authority userinfo before `@`,
+    whether or not it contains a colon and whether or not it matches a
+    recognized vendor-token shape), a raw vendor/access-key token (GitHub
+    `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`, OpenAI-style `sk-`, AWS
+    `AKIA...`, or Slack `xox...`), a `token=...` assignment, or another
+    secret-bearing keyword (for example `password`, `api_key`, a `Bearer`
+    token, or `-----BEGIN`). Any of these is an
+    **evidence-reference-credential** violation, since an evidence citation
+    must never carry a live credential. This detection is context-bound, not
+    a bare substring match: a dictionary word like `secret` or `password`
+    must appear as its own word (so "Colorado Secretary of State" is not
+    flagged), `bearer` only matches when followed by a token-shaped value (so
+    "bearer of this deed" is not flagged), an `authorization:` prefix only
+    matches when followed by the `Bearer` or `Basic` scheme (so
+    "Authorization: city clerk" is not flagged), and URL userinfo detection
+    is bounded to a URL's authority component (so a colon/`@` pair inside a
+    path, query string, or fragment is not misread as embedded credentials).
 
 ## Transition plan
 
@@ -218,7 +218,11 @@ at the document root and inside a nested object respectively, and
 
 The **evidence-reference-credential** category is additionally proven by
 `de-0009-invalid-evidence-reference-credential-token-url.json` (a bare,
-token-shaped userinfo before `@` with no colon, in `citation`),
+vendor-token-shaped userinfo before `@` with no colon, in `citation`),
+`de-0009-invalid-evidence-reference-credential-generic-token-url.json` (a
+bare, non-vendor-shaped, generic userinfo before `@` with no colon, in
+`citation` — proving the guard rejects any non-empty authority userinfo, not
+only recognized vendor-token shapes),
 `de-0009-invalid-evidence-reference-credential-raw-token.json` (a raw AWS-style
 access-key token in `recorded_by`),
 `de-0009-invalid-evidence-reference-credential-raw-token-citation.json` (a raw

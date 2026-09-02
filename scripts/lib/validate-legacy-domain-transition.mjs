@@ -59,21 +59,19 @@ const TOKEN_SHAPE_PATTERN =
 // carry a live credential: a URL with embedded userinfo (bounded to the
 // authority component, so a colon/`@` pair inside a path, query, or fragment
 // does not false-positive), a raw vendor/access-key token shape, or a
-// secret-bearing keyword. Userinfo is caught whether it takes the classic
-// `user:pass@host` shape or a bare token-shaped `<token>@host` shape (no
-// colon), since a raw token embedded directly in a URL's authority is just
-// as much a live credential as a `user:pass` pair. Each keyword is
-// context-bound so legitimate prose is not misread as a credential: bare
-// dictionary words like "secret" or "password" require a word boundary (so
-// "Secretary" does not match "secret"), "bearer" only fires when followed by
-// a token-shaped run of characters (so "bearer of this deed" does not
-// match), and "authorization:" only fires when followed by the "Bearer" or
-// "Basic" scheme (so "Authorization: city clerk" does not match). Fails
-// closed on any match.
-const CREDENTIAL_URL_PATTERN = new RegExp(
-  `://[^\\s/?#]*:[^\\s/?#@]*@|://[^\\s/?#@]*${TOKEN_SHAPE_PATTERN}[^\\s/?#@]*@`,
-  "i",
-);
+// secret-bearing keyword. Any non-empty userinfo before `@` in the authority
+// is treated as a live credential, whether or not it contains a colon and
+// whether or not it happens to match a recognized vendor-token shape — an
+// opaque, unrecognized token in a URL's authority is just as much a live
+// credential as a `user:pass` pair or a known vendor-token shape. Each
+// keyword is context-bound so legitimate prose is not misread as a
+// credential: bare dictionary words like "secret" or "password" require a
+// word boundary (so "Secretary" does not match "secret"), "bearer" only
+// fires when followed by a token-shaped run of characters (so "bearer of
+// this deed" does not match), and "authorization:" only fires when followed
+// by the "Bearer" or "Basic" scheme (so "Authorization: city clerk" does not
+// match). Fails closed on any match.
+const CREDENTIAL_URL_PATTERN = /:\/\/[^\s/?#]+@/;
 const CREDENTIAL_KEYWORD_PATTERN = new RegExp(
   [
     "\\b(?:password|passwd|secrets?|api[_-]?keys?|access[_-]?keys?|private[_-]?keys?)\\b",

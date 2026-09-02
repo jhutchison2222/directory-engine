@@ -42,6 +42,7 @@ const INVALID_FIXTURES = [
   ["de-0009-invalid-evidence-reference-credential-url.json", "evidence-reference-credential"],
   ["de-0009-invalid-evidence-reference-credential-keyword.json", "evidence-reference-credential"],
   ["de-0009-invalid-evidence-reference-credential-token-url.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-generic-token-url.json", "evidence-reference-credential"],
   ["de-0009-invalid-evidence-reference-credential-raw-token.json", "evidence-reference-credential"],
   ["de-0009-invalid-evidence-reference-credential-raw-token-citation.json", "evidence-reference-credential"],
   ["de-0009-invalid-evidence-reference-credential-token-assignment.json", "evidence-reference-credential"],
@@ -155,6 +156,12 @@ describe("evidence-reference structure", () => {
 
   it("rejects a reference citation embedding a bare, token-only URL userinfo (no colon)", async () => {
     const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-token-url.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a reference citation embedding a generic, non-vendor-shaped URL userinfo (no colon)", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-generic-token-url.json");
     const errors = validateLegacyDomainTransition(fixture, registryFixture);
     expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
   });
