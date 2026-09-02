@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "country": "US",
+  "niche_sites": [
+    {
+      "site_id": "plumbingrepairfinder",
+      "niche_id": "plumbing-repair",
+      "origin": "https://denver-plumbers.com",
+      "market_release": { "released_states": ["colorado"], "planned_states": [] }
+    }
+  ]
+}

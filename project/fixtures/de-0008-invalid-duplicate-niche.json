@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "country": "US",
+  "niche_sites": [
+    {
+      "site_id": "waterheaterrepairfinder",
+      "niche_id": "water-heater-repair",
+      "origin": "https://waterheaterrepairfinder.com",
+      "market_release": { "released_states": ["colorado"], "planned_states": [] }
+    },
+    {
+      "site_id": "waterheaterprosnational",
+      "niche_id": "water-heater-repair",
+      "origin": "https://waterheaterprosnational.com",
+      "market_release": { "released_states": ["arizona"], "planned_states": [] }
+    }
+  ]
+}

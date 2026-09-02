@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://directory-engine.invalid/schemas/niche-site-registry.schema.json",
+  "title": "Directory Engine nationwide niche-site registry contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "country", "niche_sites"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "country": { "const": "US" },
+    "niche_sites": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["site_id", "niche_id", "origin", "market_release"],
+        "properties": {
+          "site_id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          "niche_id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          "origin": { "type": "string", "minLength": 1 },
+          "market_release": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["released_states", "planned_states"],
+            "properties": {
+              "released_states": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(-[a-z]+)*$" }
+              },
+              "planned_states": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(-[a-z]+)*$" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
