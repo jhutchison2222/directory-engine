@@ -16,3 +16,4 @@
     "DE-0002's exact-head Project governance run 33555688873 ended without executing a job and did not prove the maker/CI/reviewer/remediation/delta loop end to end. DE-0004 (PR #13) and the App-authenticated exact-head Project governance runs on PR #14 proved the corrected CI path. DE-0006 defined the nationwide URL and listing identity contract and its semantic validator; DE-0007 remediated post-merge audit findings in that same validator and is merged onto main. DE-0008 is the current active, code-only work packet defining the nationwide niche-site registry contract (one canonical site per niche, kept independent of geography and of the DE-0006 in-domain URL/listing identity). None of these authorize any staging, production, or live-system operation."
   ]
 }
+
