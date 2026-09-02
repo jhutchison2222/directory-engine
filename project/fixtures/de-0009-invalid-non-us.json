@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "country": "US",
+  "legacy_domains": [
+    {
+      "legacy_domain_id": "toronto-water-heater-repair-legacy",
+      "origin": "https://torontowaterheaterrepair.com",
+      "source_geography": { "state": "ontario", "metro": "toronto" },
+      "current_evidence": {
+        "evidence_type": "dns_lookup",
+        "observed_state": "active_resolving",
+        "captured_at": "2026-08-15T00:00:00Z"
+      },
+      "transition_plan": { "disposition": "monitor", "rationale": "Continue monitoring before proposing a disposition." }
+    }
+  ]
+}

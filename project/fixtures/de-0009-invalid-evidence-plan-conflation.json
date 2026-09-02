@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "country": "US",
+  "legacy_domains": [
+    {
+      "legacy_domain_id": "denver-water-heater-repair-legacy",
+      "origin": "https://denverwaterheaterrepair.com",
+      "source_geography": { "state": "colorado", "metro": "denver" },
+      "current_evidence": {
+        "evidence_type": "manual_review",
+        "observed_state": "redirected",
+        "captured_at": "2026-08-15T00:00:00Z"
+      },
+      "transition_plan": { "disposition": "monitor", "rationale": "Invalid: evidence must not assert an executed disposition outcome." }
+    }
+  ]
+}

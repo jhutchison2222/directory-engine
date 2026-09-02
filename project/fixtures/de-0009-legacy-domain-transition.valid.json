@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "country": "US",
+  "legacy_domains": [
+    {
+      "legacy_domain_id": "denver-water-heater-repair-legacy",
+      "origin": "https://denverwaterheaterrepair.com",
+      "source_geography": {
+        "state": "colorado",
+        "metro": "denver"
+      },
+      "current_evidence": {
+        "evidence_type": "dns_lookup",
+        "observed_state": "active_resolving",
+        "captured_at": "2026-08-15T00:00:00Z"
+      },
+      "transition_plan": {
+        "disposition": "redirect_planned",
+        "redirect_target": {
+          "niche_id": "water-heater-repair",
+          "site_id": "waterheaterrepairfinder",
+          "origin": "https://waterheaterrepairfinder.com"
+        },
+        "rationale": "Consolidate legacy per-metro water heater repair domain traffic into the nationwide canonical water-heater-repair site per ADR-001; no redirect has been executed."
+      }
+    },
+    {
+      "legacy_domain_id": "denver-drain-cleaning-legacy",
+      "origin": "https://denverdraincleaning.com",
+      "source_geography": {
+        "state": "colorado",
+        "metro": "denver"
+      },
+      "current_evidence": {
+        "evidence_type": "manual_review",
+        "observed_state": "not_resolving",
+        "captured_at": "2026-07-01T00:00:00Z"
+      },
+      "transition_plan": {
+        "disposition": "retire_planned",
+        "rationale": "Legacy domain no longer resolves and no redirect target has been identified; propose retirement with no live action taken yet."
+      }
+    },
+    {
+      "legacy_domain_id": "phoenix-water-heater-repair-legacy",
+      "origin": "https://phoenixwaterheaterrepair.com",
+      "source_geography": {
+        "state": "arizona",
+        "metro": "phoenix"
+      },
+      "current_evidence": {
+        "evidence_type": "http_check",
+        "observed_state": "unknown",
+        "captured_at": "2026-08-20T00:00:00Z"
+      },
+      "transition_plan": {
+        "disposition": "monitor",
+        "rationale": "Insufficient evidence to decide a disposition; continue monitoring before proposing a redirect or retirement plan."
+      }
+    }
+  ]
+}

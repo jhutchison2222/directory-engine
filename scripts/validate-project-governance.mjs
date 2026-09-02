@@ -3,6 +3,7 @@ import { validateRemediationFixture } from "./lib/validate-remediation-fixture.m
 import { assertValidAgainstSchema } from "./lib/json-schema-lite.mjs";
 import { assertValidUrlListingIdentity } from "./lib/validate-url-listing-identity.mjs";
 import { assertValidNicheSiteRegistry } from "./lib/validate-niche-site-registry.mjs";
+import { assertValidLegacyDomainTransition } from "./lib/validate-legacy-domain-transition.mjs";
 import { assertRecursiveFailClosed } from "./lib/schema-fail-closed.mjs";
 import { readJsonFile } from "./lib/read-json-file.mjs";
 import { findFieldById } from "./lib/work-packet-template.mjs";
@@ -18,6 +19,7 @@ const requiredFiles = [
   "docs/contracts/project-state.schema.json",
   "docs/contracts/url-listing-identity.schema.json",
   "docs/contracts/niche-site-registry.schema.json",
+  "docs/contracts/legacy-domain-transition.schema.json",
   "project/current-state.json",
   ".github/ISSUE_TEMPLATE/work-packet.yml",
   ".github/PULL_REQUEST_TEMPLATE.md",
@@ -40,6 +42,7 @@ const workPacketSchema = parse("docs/contracts/work-packet.schema.json");
 const projectStateSchema = parse("docs/contracts/project-state.schema.json");
 const urlListingIdentitySchema = parse("docs/contracts/url-listing-identity.schema.json");
 const nicheSiteRegistrySchema = parse("docs/contracts/niche-site-registry.schema.json");
+const legacyDomainTransitionSchema = parse("docs/contracts/legacy-domain-transition.schema.json");
 const state = parse("project/current-state.json");
 
 const requireCondition = (condition, message) => {
@@ -58,6 +61,11 @@ requireCondition(
   nicheSiteRegistrySchema.properties?.country?.const === "US",
   'niche-site-registry schema must require country to be exactly "US"',
 );
+assertRecursiveFailClosed(legacyDomainTransitionSchema, "legacy-domain-transition schema");
+requireCondition(
+  legacyDomainTransitionSchema.properties?.country?.const === "US",
+  'legacy-domain-transition schema must require country to be exactly "US"',
+);
 
 assertValidAgainstSchema(projectStateSchema, state, "project/current-state.json");
 
@@ -70,6 +78,11 @@ const nicheSiteRegistryFixturePath = "project/fixtures/de-0008-niche-site-regist
 const nicheSiteRegistryFixture = await readJsonFile(nicheSiteRegistryFixturePath);
 assertValidAgainstSchema(nicheSiteRegistrySchema, nicheSiteRegistryFixture, nicheSiteRegistryFixturePath);
 assertValidNicheSiteRegistry(nicheSiteRegistryFixture, nicheSiteRegistryFixturePath);
+
+const legacyDomainTransitionFixturePath = "project/fixtures/de-0009-legacy-domain-transition.valid.json";
+const legacyDomainTransitionFixture = await readJsonFile(legacyDomainTransitionFixturePath);
+assertValidAgainstSchema(legacyDomainTransitionSchema, legacyDomainTransitionFixture, legacyDomainTransitionFixturePath);
+assertValidLegacyDomainTransition(legacyDomainTransitionFixture, nicheSiteRegistryFixture, legacyDomainTransitionFixturePath);
 
 requireCondition(
   workPacketSchema.required.includes("max_remediation_cycles"),

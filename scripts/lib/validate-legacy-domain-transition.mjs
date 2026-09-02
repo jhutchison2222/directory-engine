@@ -1,0 +1,216 @@
+const HOST_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*(\.[a-z0-9]+(-[a-z0-9]+)*)*\.[a-z]{2,}$/;
+
+const US_STATE_SLUGS = new Set([
+  "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut",
+  "delaware", "florida", "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa",
+  "kansas", "kentucky", "louisiana", "maine", "maryland", "massachusetts", "michigan",
+  "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada",
+  "new-hampshire", "new-jersey", "new-mexico", "new-york", "north-carolina",
+  "north-dakota", "ohio", "oklahoma", "oregon", "pennsylvania", "rhode-island",
+  "south-carolina", "south-dakota", "tennessee", "texas", "utah", "vermont",
+  "virginia", "washington", "west-virginia", "wisconsin", "wyoming",
+  "district-of-columbia",
+]);
+
+const RECOGNIZED_EVIDENCE_TYPES = new Set(["dns_lookup", "http_check", "registrar_whois", "manual_review"]);
+
+const RECOGNIZED_OBSERVED_STATES = new Set([
+  "active_resolving",
+  "not_resolving",
+  "registrar_parked_page",
+  "unknown",
+]);
+
+// Terms that assert an executed disposition outcome rather than a neutral,
+// factual observation. `current_evidence` must describe what was observed,
+// never what has been planned or executed, so using one of these as an
+// "observation" is a distinct evidence-plan-conflation violation, not merely
+// an unrecognized value.
+const EXECUTION_CLAIM_TERMS = new Set([
+  "redirected",
+  "parked",
+  "retired",
+  "live",
+  "deployed",
+  "indexed",
+  "owned",
+  "configured",
+]);
+
+const RECOGNIZED_DISPOSITIONS = new Set(["redirect_planned", "retire_planned", "monitor", "no_action_planned"]);
+
+/**
+ * Validates that `origin` is a bare https scheme+host origin: no path,
+ * query, fragment, userinfo/credentials, explicit port, or wildcard. Unlike
+ * DE-0008's canonical registry origin, a legacy origin is not restricted to a
+ * bare apex/www host free of geography terms, since a per-metro legacy
+ * domain name is exactly the pre-existing identity this inventory records.
+ */
+function validateLegacyOrigin(origin, domainId) {
+  const errors = [];
+
+  if (origin.includes("*")) {
+    errors.push(`origin-has-wildcard: legacy domain "${domainId}" origin "${origin}" must not contain a wildcard`);
+  }
+
+  if (!origin.startsWith("https://")) {
+    errors.push(`malformed-origin: legacy domain "${domainId}" origin "${origin}" must start with "https://"`);
+    return errors;
+  }
+
+  let rest = origin.slice("https://".length);
+  const credentialsIndex = rest.indexOf("@");
+  if (credentialsIndex !== -1) {
+    errors.push(
+      `origin-has-credentials: legacy domain "${domainId}" origin "${origin}" must not embed userinfo/credentials`,
+    );
+    rest = rest.slice(credentialsIndex + 1);
+  }
+
+  const specialIndex = rest.search(/[/?#]/);
+  const hostAndPort = specialIndex === -1 ? rest : rest.slice(0, specialIndex);
+  if (specialIndex !== -1) {
+    const marker = rest[specialIndex];
+    if (marker === "/") {
+      errors.push(`origin-has-path: legacy domain "${domainId}" origin "${origin}" must be a bare origin with no path`);
+    } else if (marker === "?") {
+      errors.push(
+        `origin-has-query: legacy domain "${domainId}" origin "${origin}" must be a bare origin with no query string`,
+      );
+    } else if (marker === "#") {
+      errors.push(
+        `origin-has-fragment: legacy domain "${domainId}" origin "${origin}" must be a bare origin with no fragment`,
+      );
+    }
+  }
+
+  const colonIndex = hostAndPort.indexOf(":");
+  const host = colonIndex === -1 ? hostAndPort : hostAndPort.slice(0, colonIndex);
+  if (colonIndex !== -1) {
+    errors.push(`origin-has-port: legacy domain "${domainId}" origin "${origin}" must not declare an explicit port`);
+  }
+
+  if (host.length === 0 || !HOST_PATTERN.test(host)) {
+    errors.push(`malformed-origin: legacy domain "${domainId}" origin "${origin}" host is not a valid domain`);
+  }
+
+  return errors;
+}
+
+/**
+ * Enforces the legacy-domain inventory and transition-plan rules in
+ * docs/contracts/legacy-domain-transition.md that the narrow json-schema-lite
+ * validator cannot express: cross-record uniqueness, origin shape,
+ * evidence/plan separation, and cross-validation of a redirect_planned
+ * target against the DE-0008 nationwide niche-site registry. Fails closed by
+ * reporting every violation rather than stopping at the first.
+ *
+ * `registryContract` is a DE-0008 niche-site-registry document (structurally
+ * and semantically valid) used only to check that a redirect_target names
+ * exactly one canonical registry record; this function does not itself
+ * validate the registry document.
+ */
+export function validateLegacyDomainTransition(contract, registryContract) {
+  const errors = [];
+  const seenIds = new Set();
+  const seenOrigins = new Set();
+
+  for (const record of contract.legacy_domains) {
+    if (seenIds.has(record.legacy_domain_id)) {
+      errors.push(`duplicate-id: legacy_domain_id "${record.legacy_domain_id}" is declared by more than one entry`);
+    }
+    seenIds.add(record.legacy_domain_id);
+
+    const normalizedOrigin = record.origin.toLowerCase();
+    if (seenOrigins.has(normalizedOrigin)) {
+      errors.push(`duplicate-origin: origin "${record.origin}" is declared by more than one entry`);
+    }
+    seenOrigins.add(normalizedOrigin);
+
+    errors.push(...validateLegacyOrigin(record.origin, record.legacy_domain_id));
+
+    if (!US_STATE_SLUGS.has(record.source_geography.state)) {
+      errors.push(
+        `non-us: legacy domain "${record.legacy_domain_id}" source_geography.state "${record.source_geography.state}" is not a recognized United States state`,
+      );
+    }
+
+    const { evidence_type: evidenceType, observed_state: observedState, captured_at: capturedAt } =
+      record.current_evidence;
+
+    if (!RECOGNIZED_EVIDENCE_TYPES.has(evidenceType)) {
+      errors.push(
+        `unsupported-evidence: legacy domain "${record.legacy_domain_id}" current_evidence.evidence_type "${evidenceType}" is not a recognized evidence type`,
+      );
+    }
+
+    if (EXECUTION_CLAIM_TERMS.has(observedState)) {
+      errors.push(
+        `evidence-plan-conflation: legacy domain "${record.legacy_domain_id}" current_evidence.observed_state "${observedState}" asserts an executed disposition outcome, which this code-only contract does not authorize or evidence`,
+      );
+    } else if (!RECOGNIZED_OBSERVED_STATES.has(observedState)) {
+      errors.push(
+        `unsupported-evidence: legacy domain "${record.legacy_domain_id}" current_evidence.observed_state "${observedState}" is not a recognized observed state`,
+      );
+    }
+
+    if (Number.isNaN(Date.parse(capturedAt))) {
+      errors.push(
+        `unsupported-evidence: legacy domain "${record.legacy_domain_id}" current_evidence.captured_at "${capturedAt}" is not a parseable date-time`,
+      );
+    } else if (Date.parse(capturedAt) > Date.now()) {
+      errors.push(
+        `future-dated-evidence: legacy domain "${record.legacy_domain_id}" current_evidence.captured_at "${capturedAt}" is in the future`,
+      );
+    }
+
+    const { disposition, redirect_target: redirectTarget } = record.transition_plan;
+
+    if (!RECOGNIZED_DISPOSITIONS.has(disposition)) {
+      errors.push(
+        `conflicting-disposition: legacy domain "${record.legacy_domain_id}" transition_plan.disposition "${disposition}" is not a recognized disposition`,
+      );
+    }
+
+    const isRedirectPlanned = disposition === "redirect_planned";
+    if (isRedirectPlanned && !redirectTarget) {
+      errors.push(
+        `conflicting-disposition: legacy domain "${record.legacy_domain_id}" disposition "redirect_planned" requires a redirect_target`,
+      );
+    }
+    if (!isRedirectPlanned && redirectTarget) {
+      errors.push(
+        `conflicting-disposition: legacy domain "${record.legacy_domain_id}" disposition "${disposition}" must not declare a redirect_target`,
+      );
+    }
+
+    if (redirectTarget) {
+      if (redirectTarget.origin.toLowerCase() === normalizedOrigin) {
+        errors.push(
+          `self-target: legacy domain "${record.legacy_domain_id}" redirect_target.origin must not equal its own origin`,
+        );
+      }
+
+      const matches = registryContract.niche_sites.filter(
+        (site) =>
+          site.niche_id === redirectTarget.niche_id &&
+          site.site_id === redirectTarget.site_id &&
+          site.origin.toLowerCase() === redirectTarget.origin.toLowerCase(),
+      );
+      if (matches.length !== 1) {
+        errors.push(
+          `target-mismatch: legacy domain "${record.legacy_domain_id}" redirect_target niche_id/site_id/origin does not identify exactly one canonical niche-site registry record`,
+        );
+      }
+    }
+  }
+
+  return errors;
+}
+
+export function assertValidLegacyDomainTransition(contract, registryContract, label) {
+  const errors = validateLegacyDomainTransition(contract, registryContract);
+  if (errors.length > 0) {
+    throw new Error(`${label} failed legacy-domain transition validation:\n- ${errors.join("\n- ")}`);
+  }
+}

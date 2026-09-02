@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "country": "US",
+  "legacy_domains": [
+    {
+      "legacy_domain_id": "water-heater-repair-finder-legacy",
+      "origin": "https://waterheaterrepairfinder.com",
+      "source_geography": { "state": "colorado", "metro": "denver" },
+      "current_evidence": {
+        "evidence_type": "dns_lookup",
+        "observed_state": "active_resolving",
+        "captured_at": "2026-08-15T00:00:00Z"
+      },
+      "transition_plan": {
+        "disposition": "redirect_planned",
+        "redirect_target": {
+          "niche_id": "water-heater-repair",
+          "site_id": "waterheaterrepairfinder",
+          "origin": "https://waterheaterrepairfinder.com"
+        },
+        "rationale": "Invalid: a domain cannot be planned to redirect to itself."
+      }
+    }
+  ]
+}
