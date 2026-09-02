@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "country": "US",
+  "niche_sites": [
+    {
+      "site_id": "nichefinder",
+      "niche_id": "water-heater-repair",
+      "origin": "https://waterheaterrepairfinder.com",
+      "market_release": { "released_states": ["colorado"], "planned_states": [] }
+    },
+    {
+      "site_id": "nichefinder",
+      "niche_id": "drain-cleaning",
+      "origin": "https://draincleaningfinder.com",
+      "market_release": { "released_states": ["colorado"], "planned_states": [] }
+    }
+  ]
+}
