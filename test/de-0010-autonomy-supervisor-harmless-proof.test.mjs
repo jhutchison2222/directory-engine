@@ -1,21 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { runAutonomySupervisor } from "../scripts/lib/supervisor-run.mjs";
 import { parseDispatchMarker } from "../scripts/lib/supervisor-idempotency.mjs";
-import { RETRY_INTERVAL_MS } from "../scripts/lib/supervisor-policy.mjs";
+import { AUTONOMY_BLOCKED_LABEL, MAX_DISPATCH_ATTEMPTS_PER_KEY, RETRY_INTERVAL_MS } from "../scripts/lib/supervisor-policy.mjs";
 
 /**
  * Harmless, fully in-memory, deterministic end-to-end proof of DE-0010's
  * evaluation loop. Nothing here touches a live system, a real GitHub API, or
  * the real Workspace Agent endpoint: "GitHub" is a plain in-memory store and
  * "the Workspace Agent" is a call counter. This exercises the full
- * scheduled/manual evaluation -> dispatch -> marker -> re-read cycle end to
- * end, including duplicate suppression and fresh exact-head re-read, without
- * any network access or credential material.
+ * scheduled/manual/event-driven evaluation -> dispatch -> marker -> re-read
+ * cycle end to end, including duplicate suppression, fresh exact-head
+ * re-read, the retry-attempt cap, and the AUTONOMY_BLOCKED_LABEL hold, all
+ * without any network access or credential material.
  */
 function createFakeGitHub() {
   const pullRequests = new Map();
   const issues = new Map();
   const comments = new Map(); // subjectNumber -> [{ body }]
+  const labels = new Map(); // subjectNumber -> Set<string>
   const dispatchCalls = [];
 
   function commentsFor(number) {
@@ -23,14 +25,25 @@ function createFakeGitHub() {
     return comments.get(number);
   }
 
+  function labelsFor(number) {
+    if (!labels.has(number)) labels.set(number, new Set());
+    return labels.get(number);
+  }
+
   function makeDeps(now) {
     return {
       now,
       async listPullRequests() {
-        return [...pullRequests.values()];
+        return [...pullRequests.values()].map((snapshot) => ({
+          ...snapshot,
+          labels: [...(snapshot.labels ?? []), ...labelsFor(snapshot.number)],
+        }));
       },
       async listIssues() {
-        return [...issues.values()];
+        return [...issues.values()].map((snapshot) => ({
+          ...snapshot,
+          labels: [...(snapshot.labels ?? []), ...labelsFor(snapshot.number)],
+        }));
       },
       async listDispatchMarkers(_subjectType, number) {
         if (number === "throw") throw new Error("simulated transient GitHub API failure");
@@ -41,6 +54,9 @@ function createFakeGitHub() {
       async postDispatchMarker(_subjectType, number, markerBody) {
         commentsFor(number).push({ body: markerBody });
       },
+      async addLabel(_subjectType, number, label) {
+        labelsFor(number).add(label);
+      },
       async dispatchToWorkspaceAgent({ idempotencyKey, reason, subject }) {
         dispatchCalls.push({ idempotencyKey, reason, subject });
         return { ok: true, status: 202 };
@@ -48,7 +64,7 @@ function createFakeGitHub() {
     };
   }
 
-  return { pullRequests, issues, dispatchCalls, makeDeps };
+  return { pullRequests, issues, dispatchCalls, labelsFor, makeDeps };
 }
 
 describe("DE-0010 harmless end-to-end proof", () => {
@@ -64,7 +80,7 @@ describe("DE-0010 harmless end-to-end proof", () => {
       isDraft: false,
       labels: [],
       checks: { headSha: HEAD_A, conclusion: "success" },
-      review: null, // missing exact-head review
+      reviewEvents: [], // missing exact-head review
     });
 
     // Cycle 1 (scheduled tick): checks pass, review missing -> one wake-up.
@@ -114,7 +130,7 @@ describe("DE-0010 harmless end-to-end proof", () => {
       isDraft: false,
       labels: [],
       checks: { headSha: HEAD_B, conclusion: "success" },
-      review: null,
+      reviewEvents: [],
     });
     const t4 = new Date(t3.getTime() + 1000);
     results = await runAutonomySupervisor(github.makeDeps(t4));
@@ -130,7 +146,7 @@ describe("DE-0010 harmless end-to-end proof", () => {
       isDraft: false,
       labels: [],
       checks: { headSha: HEAD_B, conclusion: "success" },
-      review: { headSha: HEAD_B, state: "approved" },
+      reviewEvents: [{ headSha: HEAD_B, state: "approved", submittedAt: t4.toISOString() }],
     });
     const t5 = new Date(t4.getTime() + 1000);
     results = await runAutonomySupervisor(github.makeDeps(t5));
@@ -150,6 +166,105 @@ describe("DE-0010 harmless end-to-end proof", () => {
     expect(github.dispatchCalls[4].reason).toBe("queued_task_start");
   });
 
+  it("PR #24 stale-verdict race: a later rejection at the same exact head blocks merge-ready dispatch after an earlier acceptance", async () => {
+    const github = createFakeGitHub();
+    const t0 = new Date("2026-09-02T12:00:00Z");
+    const HEAD_A = "a".repeat(40);
+
+    github.pullRequests.set(24, {
+      number: 24,
+      headSha: HEAD_A,
+      isDraft: false,
+      labels: [],
+      checks: { headSha: HEAD_A, conclusion: "success" },
+      reviewEvents: [
+        { headSha: HEAD_A, state: "approved", submittedAt: "2026-09-02T09:00:00Z" },
+        { headSha: HEAD_A, state: "changes_requested", submittedAt: "2026-09-02T11:00:00Z" },
+      ],
+    });
+
+    const results = await runAutonomySupervisor(github.makeDeps(t0));
+
+    expect(github.dispatchCalls).toHaveLength(1);
+    expect(github.dispatchCalls[0].reason).toBe("review_rejected");
+    expect(results[0].status).toBe("dispatched");
+    expect(results[0].reason).toBe("review_rejected");
+  });
+
+  it("blocks and applies AUTONOMY_BLOCKED_LABEL once the retry-attempt cap is reached for one exact-head reason", async () => {
+    const github = createFakeGitHub();
+    const HEAD_A = "a".repeat(40);
+    const t0 = new Date("2026-09-02T12:00:00Z");
+
+    github.pullRequests.set(300, {
+      number: 300,
+      headSha: HEAD_A,
+      isDraft: false,
+      labels: [],
+      checks: { headSha: HEAD_A, conclusion: "failure" },
+      reviewEvents: [],
+    });
+
+    // Exhaust the attempt budget, one retry-interval apart.
+    let now = t0;
+    for (let attempt = 0; attempt < MAX_DISPATCH_ATTEMPTS_PER_KEY; attempt += 1) {
+      const results = await runAutonomySupervisor(github.makeDeps(now));
+      expect(results[0].status).toBe("dispatched");
+      now = new Date(now.getTime() + RETRY_INTERVAL_MS + 1);
+    }
+    expect(github.dispatchCalls).toHaveLength(MAX_DISPATCH_ATTEMPTS_PER_KEY);
+
+    // The next evaluation at the same exact head blocks instead of
+    // dispatching a fourth time, and applies AUTONOMY_BLOCKED_LABEL.
+    const blockedResults = await runAutonomySupervisor(github.makeDeps(now));
+    expect(github.dispatchCalls).toHaveLength(MAX_DISPATCH_ATTEMPTS_PER_KEY);
+    expect(blockedResults[0].status).toBe("blocked");
+    expect(github.labelsFor(300).has(AUTONOMY_BLOCKED_LABEL)).toBe(true);
+
+    // Once labeled, every subsequent cycle holds instead of re-evaluating,
+    // even long after the retry interval would otherwise have elapsed.
+    const afterLabelNow = new Date(now.getTime() + RETRY_INTERVAL_MS * 10);
+    const heldResults = await runAutonomySupervisor(github.makeDeps(afterLabelNow));
+    expect(github.dispatchCalls).toHaveLength(MAX_DISPATCH_ATTEMPTS_PER_KEY);
+    expect(heldResults[0]).toEqual({
+      subjectType: "pull_request",
+      number: 300,
+      status: "hold",
+      reason: AUTONOMY_BLOCKED_LABEL,
+      idempotencyKey: null,
+    });
+  });
+
+  it("simultaneous schedule and event-driven evaluation of identical unchanged state produce only one dispatch", async () => {
+    const github = createFakeGitHub();
+    const HEAD_A = "a".repeat(40);
+    const t0 = new Date("2026-09-02T12:00:00Z");
+
+    github.pullRequests.set(400, {
+      number: 400,
+      headSha: HEAD_A,
+      isDraft: false,
+      labels: [],
+      checks: { headSha: HEAD_A, conclusion: "failure" },
+      reviewEvents: [],
+    });
+
+    // Two triggers (a scheduled tick and, say, a workflow_run completion
+    // event) fire back to back for the exact same unchanged state. The
+    // workflow's single non-overlapping concurrency group means these are
+    // processed one after another rather than truly in parallel; this
+    // proves the second one is a no-op regardless of which trigger caused
+    // it, since both compute the identical idempotency key.
+    const scheduledResults = await runAutonomySupervisor(github.makeDeps(t0));
+    const eventDrivenResults = await runAutonomySupervisor(github.makeDeps(new Date(t0.getTime() + 1)));
+
+    expect(github.dispatchCalls).toHaveLength(1);
+    expect(scheduledResults[0].status).toBe("dispatched");
+    expect(eventDrivenResults[0].status).toBe("skip");
+    expect(eventDrivenResults[0].reason).toBe("retry_not_due");
+    expect(eventDrivenResults[0].idempotencyKey).toBe(scheduledResults[0].idempotencyKey);
+  });
+
   it("isolates a per-item failure so one subject's error never stops evaluation of the rest", async () => {
     const github = createFakeGitHub();
     const t0 = new Date("2026-09-02T12:00:00Z");
@@ -162,7 +277,7 @@ describe("DE-0010 harmless end-to-end proof", () => {
       isDraft: false,
       labels: [],
       checks: { headSha: HEAD_A, conclusion: "failure" },
-      review: null,
+      reviewEvents: [],
     });
     github.pullRequests.set(101, {
       number: 101,
@@ -170,7 +285,7 @@ describe("DE-0010 harmless end-to-end proof", () => {
       isDraft: false,
       labels: [],
       checks: { headSha: HEAD_A, conclusion: "failure" },
-      review: null,
+      reviewEvents: [],
     });
 
     const results = await runAutonomySupervisor(github.makeDeps(t0));
@@ -194,15 +309,15 @@ describe("DE-0010 harmless end-to-end proof", () => {
       isDraft: true,
       labels: [],
       checks: { headSha: HEAD_A, conclusion: "failure" },
-      review: null,
+      reviewEvents: [],
     });
     github.pullRequests.set(103, {
       number: 103,
       headSha: HEAD_A,
       isDraft: false,
-      labels: ["security-hold"],
+      labels: ["security-review"],
       checks: { headSha: HEAD_A, conclusion: "failure" },
-      review: null,
+      reviewEvents: [],
     });
 
     const results = await runAutonomySupervisor(github.makeDeps(t0));
@@ -211,7 +326,7 @@ describe("DE-0010 harmless end-to-end proof", () => {
     expect(results).toEqual(
       expect.arrayContaining([
         { subjectType: "pull_request", number: 102, status: "skip", reason: "draft", idempotencyKey: null },
-        { subjectType: "pull_request", number: 103, status: "hold", reason: "security-hold", idempotencyKey: null },
+        { subjectType: "pull_request", number: 103, status: "hold", reason: "security-review", idempotencyKey: null },
       ]),
     );
   });

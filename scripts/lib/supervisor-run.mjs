@@ -1,14 +1,21 @@
-import { evaluatePullRequestAction, selectQueuedTasks } from "./supervisor-policy.mjs";
+import { AUTONOMY_BLOCKED_LABEL, evaluatePullRequestAction, selectQueuedTasks } from "./supervisor-policy.mjs";
 import { formatDispatchMarker } from "./supervisor-idempotency.mjs";
 
 /**
  * Applies one already-computed decision: dispatches to the Workspace Agent
- * and records the dispatch marker when the decision is "dispatch", otherwise
- * just reports the skip/hold reason. Isolated into its own function so a
- * dispatch or comment-posting failure for one subject cannot be conflated
- * with the decision logic itself.
+ * and records the dispatch marker when the decision is "dispatch", applies
+ * AUTONOMY_BLOCKED_LABEL when the decision is "blocked" (the exact-head/
+ * reason retry cap was reached), otherwise just reports the skip/hold reason.
+ * Isolated into its own function so a dispatch, labeling, or comment-posting
+ * failure for one subject cannot be conflated with the decision logic
+ * itself.
  */
 async function applyDecision({ subjectType, number, decision, now, deps }) {
+  if (decision.action === "blocked") {
+    await deps.addLabel(subjectType, number, AUTONOMY_BLOCKED_LABEL);
+    return { status: "blocked", reason: decision.reason, idempotencyKey: decision.idempotencyKey };
+  }
+
   if (decision.action !== "dispatch") {
     return { status: decision.action, reason: decision.reason, idempotencyKey: decision.idempotencyKey ?? null };
   }
@@ -36,8 +43,9 @@ async function applyDecision({ subjectType, number, decision, now, deps }) {
  *
  * - `now`: a Date, the single evaluation instant for this cycle.
  * - `listPullRequests()`: resolves non-draft-or-draft PR snapshots
- *   `{ number, headSha, isDraft, labels, checks, review }` (review already
- *   filtered to independent, non-Claude reviewers by the caller).
+ *   `{ number, headSha, isDraft, labels, checks, reviewEvents }` (reviewEvents
+ *   already filtered to trusted independent reviewers by the caller, and
+ *   already excludes non-CI-relevant check names from `checks`).
  * - `listIssues()`: resolves open issue snapshots `{ number, labels, title,
  *   body }`.
  * - `listDispatchMarkers(subjectType, number)`: resolves prior
@@ -46,6 +54,8 @@ async function applyDecision({ subjectType, number, decision, now, deps }) {
  *   `{ ok, status }`.
  * - `postDispatchMarker(subjectType, number, markerBody)`: records a
  *   dispatch marker.
+ * - `addLabel(subjectType, number, label)`: applies a label to the subject;
+ *   used only to apply AUTONOMY_BLOCKED_LABEL once the retry cap is reached.
  *
  * Each subject is evaluated and applied inside its own try/catch so one
  * subject's failure never stops evaluation of the rest (per-item failure

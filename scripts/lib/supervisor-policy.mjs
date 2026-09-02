@@ -7,16 +7,36 @@ import { buildIdempotencyKey } from "./supervisor-idempotency.mjs";
  * work on them. */
 export const AUTONOMY_READY_LABEL = "autonomy-ready";
 
+/** Label the supervisor applies itself (never a human) once a subject has
+ * exhausted MAX_DISPATCH_ATTEMPTS_PER_KEY for its current exact-state/reason
+ * key. It is included in HOLD_LABELS so that, from the next cycle onward, the
+ * blocked subject is held exactly like a human-applied hold - no special
+ * casing is needed once the label is visible on the subject. */
+export const AUTONOMY_BLOCKED_LABEL = "autonomy-blocked";
+
 /** Labels that place a subject on hold: the supervisor evaluates but never
  * dispatches while one of these is present, and always reports the hold
- * instead so a human decision is visibly required. */
-export const HOLD_LABELS = new Set(["security-hold", "major-decision-required"]);
+ * instead so a human decision is visibly required. `security-review` and
+ * `major-decision` are the exact labels authorized by issue #25; the
+ * supervisor-applied AUTONOMY_BLOCKED_LABEL is included for the same
+ * skip-and-report treatment once the retry cap is hit. */
+export const HOLD_LABELS = new Set(["security-review", "major-decision", AUTONOMY_BLOCKED_LABEL]);
 
 /** Minimum time between repeat dispatches for the same exact-state/reason
  * idempotency key. This bounds retries to something a five-minute schedule
  * will not spam, while still allowing a bounded nudge if the Workspace Agent
  * has not resolved a persistent condition. */
 export const RETRY_INTERVAL_MS = 30 * 60 * 1000;
+
+/** Maximum number of dispatch requests the supervisor will ever send for one
+ * exact-state/reason idempotency key. Once this many dispatches have already
+ * gone out for the same key, the next evaluation blocks instead of retrying
+ * again, applying AUTONOMY_BLOCKED_LABEL so a human decision is required to
+ * move the subject forward. A new head SHA (or, for issues, new content)
+ * produces a new key and a fresh attempt budget. */
+export const MAX_DISPATCH_ATTEMPTS_PER_KEY = 3;
+
+export const AUTONOMY_BLOCKED_REASON = "autonomy_blocked";
 
 export const REASONS = Object.freeze({
   CI_FAILED: "ci_failed",
@@ -26,11 +46,44 @@ export const REASONS = Object.freeze({
   QUEUED_TASK_START: "queued_task_start",
 });
 
-/** Claude must never satisfy independent exact-head review: any reviewer
- * login associated with the Claude implementer identity is excluded before a
- * review is ever considered as evidence. */
+/** Explicit allowlist of trusted independent-reviewer GitHub logins whose
+ * verdict can satisfy exact-head acceptance: the dedicated Codex reviewer and
+ * the dedicated ChatGPT Workspace Agent. Generic third-party approvals and
+ * `github-actions[bot]` never count merely for lacking "claude" in the login;
+ * they must also be one of these two named, owner-authorized identities.
+ *
+ * Open item: this work packet's available tool access could not
+ * independently confirm the literal GitHub login(s) issue #25's Codex and
+ * Workspace Agent reviewer identities use. Until Codex/owner review confirms
+ * and, if needed, corrects these literal values, this allowlist fails closed
+ * (nothing outside it satisfies acceptance) rather than guessing a broader
+ * set. See docs/automation/autonomy-supervisor.md.
+ */
+export const TRUSTED_INDEPENDENT_REVIEWER_LOGINS = Object.freeze([
+  "codex",
+  "chatgpt-codex-connector",
+  "directory-engine-workspace-agent",
+]);
+
+/** Claude must never satisfy independent exact-head review, and neither may
+ * any other generic reviewer: only a login on the explicit trusted allowlist
+ * above counts as independent-acceptance evidence. */
 export function isIndependentReviewerLogin(login) {
-  return typeof login === "string" && login.length > 0 && !/claude/i.test(login);
+  if (typeof login !== "string" || login.length === 0) return false;
+  const normalized = login.toLowerCase();
+  if (normalized.includes("claude")) return false;
+  return TRUSTED_INDEPENDENT_REVIEWER_LOGINS.includes(normalized);
+}
+
+/** Check-run names that are never treated as CI evidence: the supervisor's
+ * own check and Claude's review check would otherwise create a circular or
+ * non-CI signal (e.g. the supervisor waiting on a check that can never
+ * complete while it is itself running, or treating an implementer's own
+ * review check as an independent CI gate). */
+const NON_CI_CHECK_NAME_PATTERN = /^(claude|autonomy supervisor)\b/i;
+
+export function isCiRelevantCheckName(name) {
+  return typeof name === "string" && name.trim().length > 0 && !NON_CI_CHECK_NAME_PATTERN.test(name.trim());
 }
 
 export function findActiveHoldLabel(labels) {
@@ -49,6 +102,10 @@ function mostRecentDispatchAt(dispatches, key) {
     if (latest === null || at > latest) latest = at;
   }
   return latest;
+}
+
+function countDispatchesForKey(dispatches, key) {
+  return (dispatches ?? []).filter((dispatch) => dispatch.key === key).length;
 }
 
 export function isRetryDue(now, lastDispatchedAtMs) {
@@ -72,15 +129,35 @@ export function computeIssueStateFingerprint(issue) {
 }
 
 /**
+ * Selects the chronologically latest independent review verdict recorded
+ * against one exact head SHA. This is what prevents the PR #24 stale-verdict
+ * race: if an earlier acceptance and a later rejection/dismissal both exist
+ * for the same exact head, the later one is authoritative and is the only one
+ * returned - an earlier "approved" event at that head is never reachable once
+ * a later event at the same head exists. Events are supplied unsorted;
+ * `submittedAt` is parsed to establish chronology.
+ */
+export function selectLatestReviewEvent(reviewEvents, headSha) {
+  const atHead = (reviewEvents ?? []).filter((event) => event.headSha === headSha);
+  if (atHead.length === 0) return null;
+  const sorted = [...atHead].sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
+  return sorted[sorted.length - 1];
+}
+
+/**
  * Decides the supervisor's action for one non-draft-or-draft pull request.
  * Only checks and reviews recorded against the pull request's exact current
  * head SHA are trusted as evidence; anything recorded against an older head
  * is stale and is treated as absent, forcing a fresh evaluation.
  *
  * `pr.checks` is `{ headSha, conclusion: "success" | "failure" | "pending" }
- *   | null`. `pr.review` is `{ headSha, state: "approved" | "changes_requested"
- *   | "pending" } | null` and must already have non-independent (Claude)
- * reviews filtered out by the caller.
+ *   | null` and must already have non-CI-relevant check names filtered out by
+ * the caller (see isCiRelevantCheckName). `pr.reviewEvents` is an array of
+ * `{ headSha, state: "approved" | "changes_requested" | "dismissed" |
+ * "pending", submittedAt }` and must already have non-independent (Claude, or
+ * any login outside TRUSTED_INDEPENDENT_REVIEWER_LOGINS) reviews filtered out
+ * by the caller; the chronologically latest event at the exact current head
+ * is authoritative (see selectLatestReviewEvent).
  */
 export function evaluatePullRequestAction(pr, now, dispatches = []) {
   if (pr.isDraft) {
@@ -93,7 +170,7 @@ export function evaluatePullRequestAction(pr, now, dispatches = []) {
   }
 
   const checksAtHead = pr.checks && pr.checks.headSha === pr.headSha ? pr.checks : null;
-  const reviewAtHead = pr.review && pr.review.headSha === pr.headSha ? pr.review : null;
+  const reviewAtHead = selectLatestReviewEvent(pr.reviewEvents, pr.headSha);
 
   let reason = null;
   if (checksAtHead?.conclusion === "failure") {
@@ -101,7 +178,7 @@ export function evaluatePullRequestAction(pr, now, dispatches = []) {
   } else if (checksAtHead?.conclusion === "success") {
     if (!reviewAtHead) {
       reason = REASONS.REVIEW_MISSING;
-    } else if (reviewAtHead.state === "changes_requested") {
+    } else if (reviewAtHead.state === "changes_requested" || reviewAtHead.state === "dismissed") {
       reason = REASONS.REVIEW_REJECTED;
     } else if (reviewAtHead.state === "approved") {
       reason = REASONS.MERGE_READY;
@@ -120,6 +197,10 @@ export function evaluatePullRequestAction(pr, now, dispatches = []) {
     stateId: pr.headSha,
     reason,
   });
+
+  if (countDispatchesForKey(dispatches, idempotencyKey) >= MAX_DISPATCH_ATTEMPTS_PER_KEY) {
+    return { action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey };
+  }
 
   if (!isRetryDue(now, mostRecentDispatchAt(dispatches, idempotencyKey))) {
     return { action: "skip", reason: "retry_not_due", idempotencyKey };
@@ -151,6 +232,10 @@ export function evaluateIssueAction(issue, now, dispatches = []) {
     stateId,
     reason: REASONS.QUEUED_TASK_START,
   });
+
+  if (countDispatchesForKey(dispatches, idempotencyKey) >= MAX_DISPATCH_ATTEMPTS_PER_KEY) {
+    return { action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey };
+  }
 
   if (!isRetryDue(now, mostRecentDispatchAt(dispatches, idempotencyKey))) {
     return { action: "skip", reason: "retry_not_due", idempotencyKey };

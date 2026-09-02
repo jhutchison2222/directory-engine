@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
+  AUTONOMY_BLOCKED_LABEL,
+  AUTONOMY_BLOCKED_REASON,
   AUTONOMY_READY_LABEL,
+  MAX_DISPATCH_ATTEMPTS_PER_KEY,
   REASONS,
   RETRY_INTERVAL_MS,
+  TRUSTED_INDEPENDENT_REVIEWER_LOGINS,
   computeIssueStateFingerprint,
   evaluateIssueAction,
   evaluatePullRequestAction,
   findActiveHoldLabel,
+  isCiRelevantCheckName,
   isIndependentReviewerLogin,
   isRetryDue,
+  selectLatestReviewEvent,
   selectQueuedTasks,
 } from "../scripts/lib/supervisor-policy.mjs";
 import { buildIdempotencyKey } from "../scripts/lib/supervisor-idempotency.mjs";
@@ -24,20 +30,32 @@ function pr(overrides = {}) {
     isDraft: false,
     labels: [],
     checks: null,
-    review: null,
+    reviewEvents: [],
     ...overrides,
   };
 }
 
 describe("isIndependentReviewerLogin", () => {
-  it("accepts a non-Claude reviewer login", () => {
-    expect(isIndependentReviewerLogin("codex-reviewer-bot")).toBe(true);
+  it("accepts every trusted allowlisted login", () => {
+    for (const login of TRUSTED_INDEPENDENT_REVIEWER_LOGINS) {
+      expect(isIndependentReviewerLogin(login)).toBe(true);
+    }
   });
 
-  it("rejects any login associated with the Claude implementer identity", () => {
+  it("rejects any login associated with the Claude implementer identity, even if allowlisted-looking", () => {
     expect(isIndependentReviewerLogin("claude")).toBe(false);
     expect(isIndependentReviewerLogin("claude[bot]")).toBe(false);
     expect(isIndependentReviewerLogin("Claude-Code")).toBe(false);
+  });
+
+  it("rejects a generic third-party reviewer login not on the trusted allowlist", () => {
+    expect(isIndependentReviewerLogin("codex-reviewer-bot")).toBe(false);
+    expect(isIndependentReviewerLogin("some-random-approver")).toBe(false);
+  });
+
+  it("rejects github-actions[bot] and other generic bot logins", () => {
+    expect(isIndependentReviewerLogin("github-actions[bot]")).toBe(false);
+    expect(isIndependentReviewerLogin("dependabot[bot]")).toBe(false);
   });
 
   it("rejects a missing login", () => {
@@ -46,14 +64,41 @@ describe("isIndependentReviewerLogin", () => {
   });
 });
 
+describe("isCiRelevantCheckName", () => {
+  it("accepts an ordinary CI check name", () => {
+    expect(isCiRelevantCheckName("Project governance")).toBe(true);
+    expect(isCiRelevantCheckName("test")).toBe(true);
+  });
+
+  it("excludes Claude's own review check to avoid a circular/non-CI signal", () => {
+    expect(isCiRelevantCheckName("Claude")).toBe(false);
+    expect(isCiRelevantCheckName("Claude Code Review")).toBe(false);
+  });
+
+  it("excludes the supervisor's own check to avoid a self-referential CI signal", () => {
+    expect(isCiRelevantCheckName("Autonomy supervisor")).toBe(false);
+    expect(isCiRelevantCheckName("Autonomy Supervisor / supervise")).toBe(false);
+  });
+
+  it("rejects a missing or empty name", () => {
+    expect(isCiRelevantCheckName(undefined)).toBe(false);
+    expect(isCiRelevantCheckName("")).toBe(false);
+    expect(isCiRelevantCheckName("   ")).toBe(false);
+  });
+});
+
 describe("findActiveHoldLabel", () => {
   it("returns null when no hold label is present", () => {
     expect(findActiveHoldLabel(["autonomy-ready", "accepted"])).toBeNull();
   });
 
-  it("returns the matching hold label", () => {
-    expect(findActiveHoldLabel(["security-hold"])).toBe("security-hold");
-    expect(findActiveHoldLabel(["major-decision-required"])).toBe("major-decision-required");
+  it("returns the matching hold label using the exact authorized names", () => {
+    expect(findActiveHoldLabel(["security-review"])).toBe("security-review");
+    expect(findActiveHoldLabel(["major-decision"])).toBe("major-decision");
+  });
+
+  it("treats the supervisor-applied AUTONOMY_BLOCKED_LABEL as a hold label", () => {
+    expect(findActiveHoldLabel([AUTONOMY_BLOCKED_LABEL])).toBe(AUTONOMY_BLOCKED_LABEL);
   });
 });
 
@@ -70,10 +115,26 @@ describe("evaluatePullRequestAction: draft handling", () => {
 describe("evaluatePullRequestAction: security/major-decision holds", () => {
   it("holds instead of dispatching when a hold label is present, even with failing checks", () => {
     const decision = evaluatePullRequestAction(
-      pr({ labels: ["security-hold"], checks: { headSha: HEAD_A, conclusion: "failure" } }),
+      pr({ labels: ["security-review"], checks: { headSha: HEAD_A, conclusion: "failure" } }),
       NOW,
     );
-    expect(decision).toEqual({ action: "hold", reason: "security-hold" });
+    expect(decision).toEqual({ action: "hold", reason: "security-review" });
+  });
+
+  it("holds on major-decision", () => {
+    const decision = evaluatePullRequestAction(
+      pr({ labels: ["major-decision"], checks: { headSha: HEAD_A, conclusion: "failure" } }),
+      NOW,
+    );
+    expect(decision).toEqual({ action: "hold", reason: "major-decision" });
+  });
+
+  it("holds once the supervisor has already applied AUTONOMY_BLOCKED_LABEL", () => {
+    const decision = evaluatePullRequestAction(
+      pr({ labels: [AUTONOMY_BLOCKED_LABEL], checks: { headSha: HEAD_A, conclusion: "failure" } }),
+      NOW,
+    );
+    expect(decision).toEqual({ action: "hold", reason: AUTONOMY_BLOCKED_LABEL });
   });
 });
 
@@ -101,14 +162,17 @@ describe("evaluatePullRequestAction: exact-head review state", () => {
   const passingChecks = { headSha: HEAD_A, conclusion: "success" };
 
   it("dispatches review_missing when checks pass but no independent review exists at head", () => {
-    const decision = evaluatePullRequestAction(pr({ checks: passingChecks, review: null }), NOW);
+    const decision = evaluatePullRequestAction(pr({ checks: passingChecks, reviewEvents: [] }), NOW);
     expect(decision.action).toBe("dispatch");
     expect(decision.reason).toBe(REASONS.REVIEW_MISSING);
   });
 
   it("treats a review recorded against a stale head as missing", () => {
     const decision = evaluatePullRequestAction(
-      pr({ checks: passingChecks, review: { headSha: HEAD_B, state: "approved" } }),
+      pr({
+        checks: passingChecks,
+        reviewEvents: [{ headSha: HEAD_B, state: "approved", submittedAt: "2026-09-02T10:00:00Z" }],
+      }),
       NOW,
     );
     expect(decision.reason).toBe(REASONS.REVIEW_MISSING);
@@ -116,7 +180,21 @@ describe("evaluatePullRequestAction: exact-head review state", () => {
 
   it("dispatches review_rejected on an exact-head changes_requested review", () => {
     const decision = evaluatePullRequestAction(
-      pr({ checks: passingChecks, review: { headSha: HEAD_A, state: "changes_requested" } }),
+      pr({
+        checks: passingChecks,
+        reviewEvents: [{ headSha: HEAD_A, state: "changes_requested", submittedAt: "2026-09-02T10:00:00Z" }],
+      }),
+      NOW,
+    );
+    expect(decision.reason).toBe(REASONS.REVIEW_REJECTED);
+  });
+
+  it("dispatches review_rejected on an exact-head dismissed review (supersession)", () => {
+    const decision = evaluatePullRequestAction(
+      pr({
+        checks: passingChecks,
+        reviewEvents: [{ headSha: HEAD_A, state: "dismissed", submittedAt: "2026-09-02T10:00:00Z" }],
+      }),
       NOW,
     );
     expect(decision.reason).toBe(REASONS.REVIEW_REJECTED);
@@ -124,7 +202,10 @@ describe("evaluatePullRequestAction: exact-head review state", () => {
 
   it("dispatches merge_ready on an exact-head approved review", () => {
     const decision = evaluatePullRequestAction(
-      pr({ checks: passingChecks, review: { headSha: HEAD_A, state: "approved" } }),
+      pr({
+        checks: passingChecks,
+        reviewEvents: [{ headSha: HEAD_A, state: "approved", submittedAt: "2026-09-02T10:00:00Z" }],
+      }),
       NOW,
     );
     expect(decision.reason).toBe(REASONS.MERGE_READY);
@@ -132,10 +213,62 @@ describe("evaluatePullRequestAction: exact-head review state", () => {
 
   it("skips while an exact-head review is still pending", () => {
     const decision = evaluatePullRequestAction(
-      pr({ checks: passingChecks, review: { headSha: HEAD_A, state: "pending" } }),
+      pr({
+        checks: passingChecks,
+        reviewEvents: [{ headSha: HEAD_A, state: "pending", submittedAt: "2026-09-02T10:00:00Z" }],
+      }),
       NOW,
     );
     expect(decision).toEqual({ action: "skip", reason: "awaiting_review" });
+  });
+
+  it("PR #24 stale-verdict race: a later rejection at the same exact head overrides an earlier acceptance", () => {
+    const decision = evaluatePullRequestAction(
+      pr({
+        checks: passingChecks,
+        reviewEvents: [
+          { headSha: HEAD_A, state: "approved", submittedAt: "2026-09-02T09:00:00Z" },
+          { headSha: HEAD_A, state: "changes_requested", submittedAt: "2026-09-02T11:00:00Z" },
+        ],
+      }),
+      NOW,
+    );
+    expect(decision.action).toBe("dispatch");
+    expect(decision.reason).toBe(REASONS.REVIEW_REJECTED);
+  });
+
+  it("PR #24 stale-verdict race: array order does not matter, only chronology (submittedAt) does", () => {
+    const decision = evaluatePullRequestAction(
+      pr({
+        checks: passingChecks,
+        reviewEvents: [
+          { headSha: HEAD_A, state: "changes_requested", submittedAt: "2026-09-02T09:00:00Z" },
+          { headSha: HEAD_A, state: "approved", submittedAt: "2026-09-02T11:00:00Z" },
+        ],
+      }),
+      NOW,
+    );
+    expect(decision.reason).toBe(REASONS.MERGE_READY);
+  });
+});
+
+describe("selectLatestReviewEvent", () => {
+  it("returns null when no event matches the exact head", () => {
+    expect(
+      selectLatestReviewEvent([{ headSha: HEAD_B, state: "approved", submittedAt: "2026-09-02T09:00:00Z" }], HEAD_A),
+    ).toBeNull();
+  });
+
+  it("returns the chronologically latest event at the exact head", () => {
+    const latest = selectLatestReviewEvent(
+      [
+        { headSha: HEAD_A, state: "approved", submittedAt: "2026-09-02T09:00:00Z" },
+        { headSha: HEAD_A, state: "dismissed", submittedAt: "2026-09-02T10:00:00Z" },
+        { headSha: HEAD_B, state: "approved", submittedAt: "2026-09-02T12:00:00Z" },
+      ],
+      HEAD_A,
+    );
+    expect(latest).toEqual({ headSha: HEAD_A, state: "dismissed", submittedAt: "2026-09-02T10:00:00Z" });
   });
 });
 
@@ -183,6 +316,56 @@ describe("evaluatePullRequestAction: idempotency and retry timing", () => {
     expect(decision.action).toBe("dispatch");
     expect(decision.idempotencyKey).not.toBe(oldKey);
   });
+
+  it("two concurrent evaluations of identical, unchanged state compute the identical idempotency key (simultaneous schedule/event dedupe)", () => {
+    const scheduledDecision = evaluatePullRequestAction(pr({ checks: failingChecks }), NOW, []);
+    const eventDrivenDecision = evaluatePullRequestAction(pr({ checks: failingChecks }), NOW, []);
+    expect(scheduledDecision).toEqual(eventDrivenDecision);
+    expect(scheduledDecision.action).toBe("dispatch");
+  });
+});
+
+describe("evaluatePullRequestAction: bounded retries and autonomy-blocked", () => {
+  const failingChecks = { headSha: HEAD_A, conclusion: "failure" };
+
+  function dispatchesAtCount(count) {
+    const idempotencyKey = buildIdempotencyKey({
+      subjectType: "pull_request",
+      subjectNumber: 26,
+      stateId: HEAD_A,
+      reason: REASONS.CI_FAILED,
+    });
+    const dispatches = [];
+    for (let i = 0; i < count; i += 1) {
+      dispatches.push({
+        key: idempotencyKey,
+        dispatchedAt: new Date(NOW.getTime() - RETRY_INTERVAL_MS * (count - i)).toISOString(),
+      });
+    }
+    return { idempotencyKey, dispatches };
+  }
+
+  it(`still allows a dispatch at ${MAX_DISPATCH_ATTEMPTS_PER_KEY - 1} prior attempts`, () => {
+    const { dispatches } = dispatchesAtCount(MAX_DISPATCH_ATTEMPTS_PER_KEY - 1);
+    const decision = evaluatePullRequestAction(pr({ checks: failingChecks }), NOW, dispatches);
+    expect(decision.action).toBe("dispatch");
+  });
+
+  it(`blocks instead of dispatching once ${MAX_DISPATCH_ATTEMPTS_PER_KEY} attempts have already been made for the same exact-head key`, () => {
+    const { dispatches, idempotencyKey } = dispatchesAtCount(MAX_DISPATCH_ATTEMPTS_PER_KEY);
+    const decision = evaluatePullRequestAction(pr({ checks: failingChecks }), NOW, dispatches);
+    expect(decision).toEqual({ action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey });
+  });
+
+  it("a new head resets the attempt budget even if the old head was fully exhausted", () => {
+    const { dispatches } = dispatchesAtCount(MAX_DISPATCH_ATTEMPTS_PER_KEY);
+    const decision = evaluatePullRequestAction(
+      pr({ headSha: HEAD_B, checks: { headSha: HEAD_B, conclusion: "failure" } }),
+      NOW,
+      dispatches,
+    );
+    expect(decision.action).toBe("dispatch");
+  });
 });
 
 describe("isRetryDue", () => {
@@ -229,10 +412,10 @@ describe("evaluateIssueAction: queued-task eligibility", () => {
 
   it("holds instead of dispatching when a hold label is also present", () => {
     const decision = evaluateIssueAction(
-      { number: 25, labels: [AUTONOMY_READY_LABEL, "major-decision-required"] },
+      { number: 25, labels: [AUTONOMY_READY_LABEL, "major-decision"] },
       NOW,
     );
-    expect(decision).toEqual({ action: "hold", reason: "major-decision-required" });
+    expect(decision).toEqual({ action: "hold", reason: "major-decision" });
   });
 
   it("suppresses a duplicate dispatch for unchanged issue content", () => {
@@ -245,6 +428,22 @@ describe("evaluateIssueAction: queued-task eligibility", () => {
     });
     const decision = evaluateIssueAction(issue, NOW, [{ key, dispatchedAt: NOW.toISOString() }]);
     expect(decision).toEqual({ action: "skip", reason: "retry_not_due", idempotencyKey: key });
+  });
+
+  it(`blocks once ${MAX_DISPATCH_ATTEMPTS_PER_KEY} attempts have already been made for the same issue content`, () => {
+    const issue = { number: 25, labels: [AUTONOMY_READY_LABEL], title: "t", body: "b" };
+    const key = buildIdempotencyKey({
+      subjectType: "issue",
+      subjectNumber: 25,
+      stateId: computeIssueStateFingerprint(issue),
+      reason: REASONS.QUEUED_TASK_START,
+    });
+    const dispatches = Array.from({ length: MAX_DISPATCH_ATTEMPTS_PER_KEY }, (_, i) => ({
+      key,
+      dispatchedAt: new Date(NOW.getTime() - RETRY_INTERVAL_MS * (MAX_DISPATCH_ATTEMPTS_PER_KEY - i)).toISOString(),
+    }));
+    const decision = evaluateIssueAction(issue, NOW, dispatches);
+    expect(decision).toEqual({ action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey: key });
   });
 });
 
