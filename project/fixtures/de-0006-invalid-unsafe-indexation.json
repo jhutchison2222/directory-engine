@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "niche_domain": "example-water-heater-repair.com",
+  "country": "US",
+  "service_taxonomy": ["drain-cleaning"],
+  "canonical_urls": [
+    {
+      "path": "/colorado/denver/acme-plumbing-denver/",
+      "kind": "business",
+      "indexable": true,
+      "sitemap_eligible": true,
+      "indexation_readiness": {
+        "has_listings": true,
+        "data_quality_checked": true,
+        "has_unique_content": false,
+        "canonical_validated": true,
+        "internally_linked": false
+      }
+    }
+  ],
+  "listings": [
+    {
+      "branch_id": "acme-plumbing-denver",
+      "organization_id": "acme-plumbing",
+      "canonical_path": "/colorado/denver/acme-plumbing-denver/",
+      "state": "colorado",
+      "city": "denver",
+      "served_areas": ["denver"],
+      "metro": null,
+      "services": ["drain-cleaning"]
+    }
+  ],
+  "redirects": []
+}

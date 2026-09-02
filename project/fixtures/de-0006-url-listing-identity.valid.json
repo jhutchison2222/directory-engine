@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "niche_domain": "example-water-heater-repair.com",
+  "country": "US",
+  "service_taxonomy": ["water-heater-repair", "drain-cleaning", "leak-detection"],
+  "canonical_urls": [
+    {
+      "path": "/colorado/",
+      "kind": "state",
+      "indexable": false,
+      "sitemap_eligible": false,
+      "indexation_readiness": {
+        "has_listings": true,
+        "data_quality_checked": false,
+        "has_unique_content": false,
+        "canonical_validated": false,
+        "internally_linked": false
+      }
+    },
+    {
+      "path": "/colorado/denver/",
+      "kind": "city",
+      "indexable": true,
+      "sitemap_eligible": true,
+      "indexation_readiness": {
+        "has_listings": true,
+        "data_quality_checked": true,
+        "has_unique_content": true,
+        "canonical_validated": true,
+        "internally_linked": true
+      }
+    },
+    {
+      "path": "/colorado/denver/five-points/",
+      "kind": "neighborhood",
+      "indexable": false,
+      "sitemap_eligible": false,
+      "indexation_readiness": {
+        "has_listings": false,
+        "data_quality_checked": false,
+        "has_unique_content": false,
+        "canonical_validated": false,
+        "internally_linked": false
+      }
+    },
+    {
+      "path": "/colorado/denver/water-heater-repair/",
+      "kind": "service_area",
+      "indexable": true,
+      "sitemap_eligible": true,
+      "indexation_readiness": {
+        "has_listings": true,
+        "data_quality_checked": true,
+        "has_unique_content": true,
+        "canonical_validated": true,
+        "internally_linked": true
+      }
+    },
+    {
+      "path": "/colorado/denver/acme-plumbing-denver/",
+      "kind": "business",
+      "indexable": true,
+      "sitemap_eligible": true,
+      "indexation_readiness": {
+        "has_listings": true,
+        "data_quality_checked": true,
+        "has_unique_content": true,
+        "canonical_validated": true,
+        "internally_linked": true
+      }
+    },
+    {
+      "path": "/colorado/boulder/acme-plumbing-boulder/",
+      "kind": "business",
+      "indexable": false,
+      "sitemap_eligible": false,
+      "indexation_readiness": {
+        "has_listings": true,
+        "data_quality_checked": true,
+        "has_unique_content": false,
+        "canonical_validated": true,
+        "internally_linked": false
+      }
+    }
+  ],
+  "listings": [
+    {
+      "branch_id": "acme-plumbing-denver",
+      "organization_id": "acme-plumbing",
+      "canonical_path": "/colorado/denver/acme-plumbing-denver/",
+      "state": "colorado",
+      "city": "denver",
+      "served_areas": ["denver", "aurora", "lakewood"],
+      "metro": "denver-metro",
+      "services": ["water-heater-repair", "drain-cleaning"]
+    },
+    {
+      "branch_id": "acme-plumbing-boulder",
+      "organization_id": "acme-plumbing",
+      "canonical_path": "/colorado/boulder/acme-plumbing-boulder/",
+      "state": "colorado",
+      "city": "boulder",
+      "served_areas": ["boulder", "longmont"],
+      "metro": null,
+      "services": ["water-heater-repair"]
+    }
+  ],
+  "redirects": [
+    {
+      "from": "/denver-metro/acme-plumbing/",
+      "to": "/colorado/denver/acme-plumbing-denver/",
+      "reason": "Superseded metro-domain business URL consolidated onto the nationwide niche domain per ADR-001.",
+      "status": 301
+    }
+  ]
+}

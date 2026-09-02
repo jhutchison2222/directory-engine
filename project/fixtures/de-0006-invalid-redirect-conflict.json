@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "niche_domain": "example-water-heater-repair.com",
+  "country": "US",
+  "service_taxonomy": ["water-heater-repair"],
+  "canonical_urls": [
+    {
+      "path": "/colorado/denver/acme-plumbing-denver/",
+      "kind": "business",
+      "indexable": false,
+      "sitemap_eligible": false,
+      "indexation_readiness": {
+        "has_listings": false,
+        "data_quality_checked": false,
+        "has_unique_content": false,
+        "canonical_validated": false,
+        "internally_linked": false
+      }
+    },
+    {
+      "path": "/colorado/boulder/acme-plumbing-boulder/",
+      "kind": "business",
+      "indexable": false,
+      "sitemap_eligible": false,
+      "indexation_readiness": {
+        "has_listings": false,
+        "data_quality_checked": false,
+        "has_unique_content": false,
+        "canonical_validated": false,
+        "internally_linked": false
+      }
+    }
+  ],
+  "listings": [],
+  "redirects": [
+    {
+      "from": "/denver-metro/acme-plumbing/",
+      "to": "/colorado/denver/acme-plumbing-denver/",
+      "reason": "Superseded metro-domain business URL consolidated onto the nationwide niche domain per ADR-001.",
+      "status": 301
+    },
+    {
+      "from": "/denver-metro/acme-plumbing/",
+      "to": "/colorado/boulder/acme-plumbing-boulder/",
+      "reason": "Conflicting redirect target declared for the same superseded source.",
+      "status": 301
+    }
+  ]
+}

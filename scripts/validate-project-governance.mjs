@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { validateRemediationFixture } from "./lib/validate-remediation-fixture.mjs";
 import { assertValidAgainstSchema } from "./lib/json-schema-lite.mjs";
+import { assertValidUrlListingIdentity } from "./lib/validate-url-listing-identity.mjs";
+import { assertRecursiveFailClosed } from "./lib/schema-fail-closed.mjs";
 import { readJsonFile } from "./lib/read-json-file.mjs";
 import { findFieldById } from "./lib/work-packet-template.mjs";
 import { buildRemediationCycleOptions } from "./lib/remediation-cycles.mjs";
@@ -13,6 +15,7 @@ const requiredFiles = [
   "docs/decisions/ADR-001-national-niche-domains.md",
   "docs/contracts/work-packet.schema.json",
   "docs/contracts/project-state.schema.json",
+  "docs/contracts/url-listing-identity.schema.json",
   "project/current-state.json",
   ".github/ISSUE_TEMPLATE/work-packet.yml",
   ".github/PULL_REQUEST_TEMPLATE.md",
@@ -33,16 +36,27 @@ const parse = (file) => {
 
 const workPacketSchema = parse("docs/contracts/work-packet.schema.json");
 const projectStateSchema = parse("docs/contracts/project-state.schema.json");
+const urlListingIdentitySchema = parse("docs/contracts/url-listing-identity.schema.json");
 const state = parse("project/current-state.json");
 
 const requireCondition = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 
-requireCondition(workPacketSchema.additionalProperties === false, "work-packet schema must fail closed on unknown properties");
-requireCondition(projectStateSchema.additionalProperties === false, "project-state schema must fail closed on unknown properties");
+assertRecursiveFailClosed(workPacketSchema, "work-packet schema");
+assertRecursiveFailClosed(projectStateSchema, "project-state schema");
+assertRecursiveFailClosed(urlListingIdentitySchema, "url-listing-identity schema");
+requireCondition(
+  urlListingIdentitySchema.properties?.country?.const === "US",
+  'url-listing-identity schema must require country to be exactly "US"',
+);
 
 assertValidAgainstSchema(projectStateSchema, state, "project/current-state.json");
+
+const urlListingIdentityFixturePath = "project/fixtures/de-0006-url-listing-identity.valid.json";
+const urlListingIdentityFixture = await readJsonFile(urlListingIdentityFixturePath);
+assertValidAgainstSchema(urlListingIdentitySchema, urlListingIdentityFixture, urlListingIdentityFixturePath);
+assertValidUrlListingIdentity(urlListingIdentityFixture, urlListingIdentityFixturePath);
 
 requireCondition(
   workPacketSchema.required.includes("max_remediation_cycles"),

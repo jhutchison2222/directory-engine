@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "niche_domain": "example-water-heater-repair.com",
+  "country": "USA",
+  "service_taxonomy": ["water-heater-repair"],
+  "canonical_urls": [],
+  "listings": [],
+  "redirects": []
+}
