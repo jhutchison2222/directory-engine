@@ -126,9 +126,18 @@ attributable for the observation:
     **missing-evidence-attribution** violation.
   - Neither `recorded_by` nor `citation` may embed credential or secret
     material — URL userinfo (`user:pass@host`) or a secret-bearing keyword
-    (for example `password`, `api_key`, `bearer `, `-----BEGIN`). Either is an
-    **evidence-reference-credential** violation, since an evidence citation
-    must never carry a live credential.
+    (for example `password`, `api_key`, a `Bearer` token, or `-----BEGIN`).
+    Either is an **evidence-reference-credential** violation, since an
+    evidence citation must never carry a live credential. This detection is
+    context-bound, not a bare substring match: a dictionary word like
+    `secret` or `password` must appear as its own word (so "Colorado
+    Secretary of State" is not flagged), `bearer` only matches when followed
+    by a token-shaped value (so "bearer of this deed" is not flagged), an
+    `authorization:` prefix only matches when followed by the `Bearer` or
+    `Basic` scheme (so "Authorization: city clerk" is not flagged), and URL
+    userinfo detection is bounded to a URL's authority component (so a
+    colon/`@` pair inside a path, query string, or fragment is not
+    misread as embedded credentials).
 
 ## Transition plan
 
@@ -155,7 +164,10 @@ attributable for the observation:
   cannot be planned to redirect to itself.
 - `rationale` is a required, non-empty explanation of the proposed
   disposition. This contract records the proposal only; it does not execute
-  any redirect, parking, or retirement.
+  any redirect, parking, or retirement. Like `current_evidence.reference`,
+  `rationale` is unconstrained free text, so it is scanned for the same
+  context-bound credential/secret material described under "Evidence"
+  above; a match is a **rationale-credential** violation.
 
 ## Machine-readable schema
 
@@ -170,8 +182,9 @@ origin-has-query, origin-has-fragment, origin-has-credentials,
 origin-has-port, origin-has-wildcard, self-target, conflicting-disposition,
 non-us, unsupported-evidence, future-dated-evidence,
 evidence-plan-conflation, evidence-subject-mismatch,
-evidence-reference-credential, missing-evidence-attribution, and
-target-mismatch), so `scripts/lib/validate-legacy-domain-transition.mjs`
+evidence-reference-credential, rationale-credential,
+missing-evidence-attribution, and target-mismatch), so
+`scripts/lib/validate-legacy-domain-transition.mjs`
 implements those checks and fails closed — any violation is reported, not
 silently accepted. `scripts/lib/schema-fail-closed.mjs` implements the
 recursive `additionalProperties: false` check that `check:governance` runs
@@ -185,11 +198,20 @@ representative valid inventory document with one entry per recognized
 a record actually present in
 `project/fixtures/de-0008-niche-site-registry.valid.json`.
 `project/fixtures/de-0009-invalid-*.json` each contain a deliberate
-violation, one file per fail-closed category listed above, plus
-`de-0009-invalid-country-not-us.json` for the internal country identity
-requirement, `de-0009-invalid-unsupported-root-property.json` /
-`de-0009-invalid-unsupported-nested-property.json` proving the recursive
+violation, one file per fail-closed category listed above (including
+`de-0009-invalid-rationale-credential.json` for the **rationale-credential**
+category), plus `de-0009-invalid-country-not-us.json` for the internal
+country identity requirement, `de-0009-invalid-unsupported-root-property.json`
+/ `de-0009-invalid-unsupported-nested-property.json` proving the recursive
 `additionalProperties: false` schema constraint rejects an undeclared field
 at the document root and inside a nested object respectively, and
 `de-0009-invalid-evidence-missing-subject.json` proving the schema requires
 `observed_subject`.
+
+`de-0009-legacy-domain-transition.valid.json` also doubles as the
+false-positive regression fixture for the context-bound credential
+detection described under "Evidence" above: its `citation` and `rationale`
+values deliberately include legitimate prose such as "Colorado Secretary of
+State", "the bearer of this deed", "Authorization: city clerk", and a URL
+with a query string (rather than embedded userinfo) containing a colon and
+an `@`, none of which trip the credential guard.

@@ -47,12 +47,27 @@ const RECOGNIZED_DISPOSITIONS = new Set([
 
 const RECOGNIZED_REFERENCE_TYPES = new Set(["internal_note", "internal_log_excerpt", "external_registrar_record"]);
 
-// Detects credential/secret material so an evidence reference can never carry
-// a live credential: a URL with embedded userinfo, or a common secret-bearing
-// keyword. Intentionally broad and fails closed on any match.
-const CREDENTIAL_URL_PATTERN = /:\/\/[^\s/]*:[^\s/@]*@/;
-const CREDENTIAL_KEYWORD_PATTERN =
-  /(password|passwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|bearer\s|authorization\s*:|-----begin)/i;
+// Detects credential/secret material so a persisted free-text field can never
+// carry a live credential: a URL with embedded userinfo (bounded to the
+// authority component, so a colon/`@` pair inside a path, query, or fragment
+// does not false-positive), or a secret-bearing keyword. Each keyword is
+// context-bound so legitimate prose is not misread as a credential: bare
+// dictionary words like "secret" or "password" require a word boundary (so
+// "Secretary" does not match "secret"), "bearer" only fires when followed by
+// a token-shaped run of characters (so "bearer of this deed" does not
+// match), and "authorization:" only fires when followed by the "Bearer" or
+// "Basic" scheme (so "Authorization: city clerk" does not match). Fails
+// closed on any match.
+const CREDENTIAL_URL_PATTERN = /:\/\/[^\s/?#]*:[^\s/?#@]*@/;
+const CREDENTIAL_KEYWORD_PATTERN = new RegExp(
+  [
+    "\\b(?:password|passwd|secrets?|api[_-]?keys?|access[_-]?keys?|private[_-]?keys?)\\b",
+    "\\bbearer\\s+[A-Za-z0-9._~+/=-]{8,}",
+    "\\bauthorization\\s*:\\s*(?:bearer|basic)\\b",
+    "-----begin",
+  ].join("|"),
+  "i",
+);
 
 function containsCredentialMaterial(value) {
   return CREDENTIAL_URL_PATTERN.test(value) || CREDENTIAL_KEYWORD_PATTERN.test(value);
@@ -214,7 +229,13 @@ export function validateLegacyDomainTransition(contract, registryContract) {
       );
     }
 
-    const { disposition, redirect_target: redirectTarget } = record.transition_plan;
+    const { disposition, redirect_target: redirectTarget, rationale } = record.transition_plan;
+
+    if (containsCredentialMaterial(rationale)) {
+      errors.push(
+        `rationale-credential: legacy domain "${record.legacy_domain_id}" transition_plan.rationale must not embed credential or secret material`,
+      );
+    }
 
     if (!RECOGNIZED_DISPOSITIONS.has(disposition)) {
       errors.push(

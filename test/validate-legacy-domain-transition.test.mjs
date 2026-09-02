@@ -38,6 +38,7 @@ const INVALID_FIXTURES = [
   ["de-0009-invalid-evidence-subject-mismatch.json", "evidence-subject-mismatch"],
   ["de-0009-invalid-evidence-reference-credential-url.json", "evidence-reference-credential"],
   ["de-0009-invalid-evidence-reference-credential-keyword.json", "evidence-reference-credential"],
+  ["de-0009-invalid-rationale-credential.json", "rationale-credential"],
   ["de-0009-invalid-missing-evidence-attribution.json", "missing-evidence-attribution"],
   ["de-0009-invalid-disposition-unrecognized.json", "conflicting-disposition"],
 ];
@@ -143,10 +144,37 @@ describe("evidence-reference structure", () => {
     expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
   });
 
+  it("rejects a transition_plan.rationale embedding a secret keyword", async () => {
+    const fixture = await loadFixture("de-0009-invalid-rationale-credential.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("rationale-credential:"))).toBe(true);
+  });
+
   it("rejects a blank recorded_by as missing attribution", async () => {
     const fixture = await loadFixture("de-0009-invalid-missing-evidence-attribution.json");
     const errors = validateLegacyDomainTransition(fixture, registryFixture);
     expect(errors.some((message) => message.startsWith("missing-evidence-attribution:"))).toBe(true);
+  });
+
+  it("does not flag legitimate prose that merely contains a credential-adjacent word", async () => {
+    const fixture = await loadFixture("de-0009-legacy-domain-transition.valid.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(false);
+    expect(errors.some((message) => message.startsWith("rationale-credential:"))).toBe(false);
+    const citations = fixture.legacy_domains.map((entry) => entry.current_evidence.reference.citation);
+    expect(citations.some((citation) => citation.includes("Colorado Secretary of State"))).toBe(true);
+    expect(citations.some((citation) => citation.includes("Authorization: city clerk"))).toBe(true);
+    const rationales = fixture.legacy_domains.map((entry) => entry.transition_plan.rationale);
+    expect(rationales.some((rationale) => rationale.includes("the bearer of this deed"))).toBe(true);
+  });
+
+  it("does not flag a URL query string containing a colon and an @ outside any userinfo", async () => {
+    const fixture = await loadFixture("de-0009-legacy-domain-transition.valid.json");
+    const citation = fixture.legacy_domains
+      .map((entry) => entry.current_evidence.reference.citation)
+      .find((value) => value.includes("query string only, no userinfo"));
+    expect(citation).toContain("https://internal.example?case:412@2026-08-20");
+    expect(validateLegacyDomainTransition(fixture, registryFixture)).toEqual([]);
   });
 });
 

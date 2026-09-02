@@ -17,7 +17,7 @@
         "reference": {
           "reference_type": "internal_log_excerpt",
           "recorded_by": "governance-bot",
-          "citation": "Illustrative DNS lookup log entry for this reserved example.-TLD legacy origin; no live system was queried."
+          "citation": "Illustrative DNS lookup log entry for this reserved example.-TLD legacy origin, cross-checked against the Colorado Secretary of State business registry; no live system was queried."
         }
       },
       "transition_plan": {
@@ -27,7 +27,7 @@
           "site_id": "waterheaterrepairfinder",
           "origin": "https://waterheaterrepairfinder.com"
         },
-        "rationale": "Propose consolidating this reserved example legacy origin's traffic into the nationwide canonical water-heater-repair site per ADR-001; no redirect has been executed."
+        "rationale": "Propose consolidating this reserved example legacy origin's traffic into the nationwide canonical water-heater-repair site per ADR-001, the same way the bearer of this deed transferred historical title in the original metro filing; no redirect has been executed."
       }
     },
     {
@@ -45,7 +45,7 @@
         "reference": {
           "reference_type": "internal_note",
           "recorded_by": "governance-bot",
-          "citation": "Illustrative manual review note for this reserved example.-TLD legacy origin; no live system was queried."
+          "citation": "Illustrative manual review note for this reserved example.-TLD legacy origin, filed per the note in Authorization: city clerk records; no live system was queried."
         }
       },
       "transition_plan": {
@@ -68,7 +68,7 @@
         "reference": {
           "reference_type": "internal_log_excerpt",
           "recorded_by": "governance-bot",
-          "citation": "Illustrative HTTP check log entry for this reserved example.-TLD legacy origin; no live system was queried."
+          "citation": "Illustrative HTTP check log entry for this reserved example.-TLD legacy origin, see https://internal.example?case:412@2026-08-20 for the raw report (query string only, no userinfo); no live system was queried."
         }
       },
       "transition_plan": {
