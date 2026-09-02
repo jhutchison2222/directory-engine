@@ -47,10 +47,22 @@ const RECOGNIZED_DISPOSITIONS = new Set([
 
 const RECOGNIZED_REFERENCE_TYPES = new Set(["internal_note", "internal_log_excerpt", "external_registrar_record"]);
 
+// Raw vendor/access-key token shapes that identify a live credential by
+// shape alone, independent of any surrounding keyword: GitHub personal-
+// access tokens (classic `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and fine-grained
+// `github_pat_`), OpenAI-style `sk-` secret keys, AWS `AKIA` access-key IDs,
+// and Slack `xox`-prefixed tokens.
+const TOKEN_SHAPE_PATTERN =
+  "(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})";
+
 // Detects credential/secret material so a persisted free-text field can never
 // carry a live credential: a URL with embedded userinfo (bounded to the
 // authority component, so a colon/`@` pair inside a path, query, or fragment
-// does not false-positive), or a secret-bearing keyword. Each keyword is
+// does not false-positive), a raw vendor/access-key token shape, or a
+// secret-bearing keyword. Userinfo is caught whether it takes the classic
+// `user:pass@host` shape or a bare token-shaped `<token>@host` shape (no
+// colon), since a raw token embedded directly in a URL's authority is just
+// as much a live credential as a `user:pass` pair. Each keyword is
 // context-bound so legitimate prose is not misread as a credential: bare
 // dictionary words like "secret" or "password" require a word boundary (so
 // "Secretary" does not match "secret"), "bearer" only fires when followed by
@@ -58,13 +70,18 @@ const RECOGNIZED_REFERENCE_TYPES = new Set(["internal_note", "internal_log_excer
 // match), and "authorization:" only fires when followed by the "Bearer" or
 // "Basic" scheme (so "Authorization: city clerk" does not match). Fails
 // closed on any match.
-const CREDENTIAL_URL_PATTERN = /:\/\/[^\s/?#]*:[^\s/?#@]*@/;
+const CREDENTIAL_URL_PATTERN = new RegExp(
+  `://[^\\s/?#]*:[^\\s/?#@]*@|://[^\\s/?#@]*${TOKEN_SHAPE_PATTERN}[^\\s/?#@]*@`,
+  "i",
+);
 const CREDENTIAL_KEYWORD_PATTERN = new RegExp(
   [
     "\\b(?:password|passwd|secrets?|api[_-]?keys?|access[_-]?keys?|private[_-]?keys?)\\b",
     "\\bbearer\\s+[A-Za-z0-9._~+/=-]{8,}",
     "\\bauthorization\\s*:\\s*(?:bearer|basic)\\b",
     "-----begin",
+    TOKEN_SHAPE_PATTERN,
+    "\\btoken\\s*=\\s*\\S+",
   ].join("|"),
   "i",
 );

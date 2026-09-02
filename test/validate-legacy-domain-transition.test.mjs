@@ -38,8 +38,14 @@ const INVALID_FIXTURES = [
   ["de-0009-invalid-evidence-subject-mismatch.json", "evidence-subject-mismatch"],
   ["de-0009-invalid-evidence-reference-credential-url.json", "evidence-reference-credential"],
   ["de-0009-invalid-evidence-reference-credential-keyword.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-token-url.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-raw-token.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-raw-token-citation.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-token-assignment.json", "evidence-reference-credential"],
   ["de-0009-invalid-rationale-credential.json", "rationale-credential"],
   ["de-0009-invalid-missing-evidence-attribution.json", "missing-evidence-attribution"],
+  ["de-0009-invalid-blank-citation.json", "missing-evidence-attribution"],
+  ["de-0009-invalid-unsupported-reference-type.json", "unsupported-evidence"],
   ["de-0009-invalid-disposition-unrecognized.json", "conflicting-disposition"],
 ];
 
@@ -142,6 +148,42 @@ describe("evidence-reference structure", () => {
     const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-keyword.json");
     const errors = validateLegacyDomainTransition(fixture, registryFixture);
     expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a reference citation embedding a bare, token-only URL userinfo (no colon)", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-token-url.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a reference recorded_by embedding a raw vendor access-key token", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-raw-token.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a reference citation embedding a raw vendor access-key token", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-raw-token-citation.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a reference citation embedding a token=... assignment", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-token-assignment.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects an unsupported reference.reference_type", async () => {
+    const fixture = await loadFixture("de-0009-invalid-unsupported-reference-type.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("unsupported-evidence:"))).toBe(true);
+  });
+
+  it("rejects a blank (whitespace-only) citation as missing attribution", async () => {
+    const fixture = await loadFixture("de-0009-invalid-blank-citation.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("missing-evidence-attribution:"))).toBe(true);
   });
 
   it("rejects a transition_plan.rationale embedding a secret keyword", async () => {

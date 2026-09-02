@@ -125,19 +125,23 @@ attributable for the observation:
     (empty or whitespace-only) value for either is a
     **missing-evidence-attribution** violation.
   - Neither `recorded_by` nor `citation` may embed credential or secret
-    material — URL userinfo (`user:pass@host`) or a secret-bearing keyword
-    (for example `password`, `api_key`, a `Bearer` token, or `-----BEGIN`).
-    Either is an **evidence-reference-credential** violation, since an
-    evidence citation must never carry a live credential. This detection is
-    context-bound, not a bare substring match: a dictionary word like
-    `secret` or `password` must appear as its own word (so "Colorado
-    Secretary of State" is not flagged), `bearer` only matches when followed
-    by a token-shaped value (so "bearer of this deed" is not flagged), an
-    `authorization:` prefix only matches when followed by the `Bearer` or
-    `Basic` scheme (so "Authorization: city clerk" is not flagged), and URL
-    userinfo detection is bounded to a URL's authority component (so a
-    colon/`@` pair inside a path, query string, or fragment is not
-    misread as embedded credentials).
+    material — URL userinfo (`user:pass@host` or a bare token-shaped
+    `<token>@host`), a raw vendor/access-key token (GitHub `ghp_`/`gho_`/
+    `ghu_`/`ghs_`/`ghr_`/`github_pat_`, OpenAI-style `sk-`, AWS `AKIA...`, or
+    Slack `xox...`), a `token=...` assignment, or another secret-bearing
+    keyword (for example `password`, `api_key`, a `Bearer` token, or
+    `-----BEGIN`). Any of these is an **evidence-reference-credential**
+    violation, since an evidence citation must never carry a live
+    credential. This detection is context-bound, not a bare substring
+    match: a dictionary word like `secret` or `password` must appear as its
+    own word (so "Colorado Secretary of State" is not flagged), `bearer`
+    only matches when followed by a token-shaped value (so "bearer of this
+    deed" is not flagged), an `authorization:` prefix only matches when
+    followed by the `Bearer` or `Basic` scheme (so "Authorization: city
+    clerk" is not flagged), and URL userinfo detection (whether
+    `user:pass@` or a bare token before `@`) is bounded to a URL's authority
+    component (so a colon/`@` pair inside a path, query string, or fragment
+    is not misread as embedded credentials).
 
 ## Transition plan
 
@@ -207,6 +211,21 @@ country identity requirement, `de-0009-invalid-unsupported-root-property.json`
 at the document root and inside a nested object respectively, and
 `de-0009-invalid-evidence-missing-subject.json` proving the schema requires
 `observed_subject`.
+
+The **evidence-reference-credential** category is additionally proven by
+`de-0009-invalid-evidence-reference-credential-token-url.json` (a bare,
+token-shaped userinfo before `@` with no colon, in `citation`),
+`de-0009-invalid-evidence-reference-credential-raw-token.json` (a raw AWS-style
+access-key token in `recorded_by`),
+`de-0009-invalid-evidence-reference-credential-raw-token-citation.json` (a raw
+Slack-style token in `citation`), and
+`de-0009-invalid-evidence-reference-credential-token-assignment.json` (a
+`token=...` assignment in `citation`) — each using an obviously synthetic
+value. The **unsupported-evidence** category is additionally proven by
+`de-0009-invalid-unsupported-reference-type.json` (an unrecognized
+`reference.reference_type`), and the **missing-evidence-attribution** category
+is additionally proven by `de-0009-invalid-blank-citation.json` (a
+blank/whitespace-only `citation` with a non-blank `recorded_by`).
 
 `de-0009-legacy-domain-transition.valid.json` also doubles as the
 false-positive regression fixture for the context-bound credential
