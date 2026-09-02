@@ -77,7 +77,7 @@ export function validateUrlListingIdentity(contract) {
       );
     }
 
-    if (url.kind === "service_area") {
+    if (url.kind === "service_area" && segments.length === expectedDepth) {
       const leaf = segments[segments.length - 1];
       if (leaf !== undefined && !contract.service_taxonomy.includes(leaf)) {
         errors.push(
@@ -206,15 +206,23 @@ export function validateUrlListingIdentity(contract) {
     }
   }
 
+  const reportedCycleNodes = new Set();
   for (const from of redirectFromTargets.keys()) {
+    if (reportedCycleNodes.has(from)) continue;
+    const order = [];
     const visited = new Set();
     let current = from;
     while (redirectFromTargets.has(current)) {
       if (visited.has(current)) {
-        errors.push(`redirect-cycle: redirect chain starting at "${from}" contains a cycle`);
+        const cycleNodes = order.slice(order.indexOf(current));
+        if (!cycleNodes.some((node) => reportedCycleNodes.has(node))) {
+          for (const node of cycleNodes) reportedCycleNodes.add(node);
+          errors.push(`redirect-cycle: redirect chain starting at "${cycleNodes[0]}" contains a cycle`);
+        }
         break;
       }
       visited.add(current);
+      order.push(current);
       current = redirectFromTargets.get(current);
     }
   }
