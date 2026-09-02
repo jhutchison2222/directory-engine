@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-02T13:54:00Z",
+  "updated_at": "2026-09-02T14:25:54Z",
   "accepted_architecture": "ADR-001-national-niche-domains",
   "repository_baseline": "4a0f64196a95d2168d5a7fecbdb628fcaac5a280",
   "repository_capability": "contains_write_paths",
@@ -9,7 +9,7 @@
   "auto_merge_enabled": false,
   "production_mutations_authorized": false,
   "active_work_packet": "DE-0006",
-  "next_step": "Await Codex's exact-head review of the DE-0006 code-only nationwide URL and listing identity contract (docs/contracts/url-listing-identity.md, its schema, the semantic validator, and the valid/invalid fixtures) and complete any remaining remediation cycles.",
+  "next_step": "Await Codex's exact-head review of the DE-0006 remediation (internal US country identity, per-page-kind indexation readiness, cross-record URL/listing/taxonomy identity, deterministic redirects, and recursive schema fail-closed enforcement) and complete any remaining remediation cycles.",
   "notes": [
     "The repository README still describes v0.2.0 as read-only while current main contains write-path source code; deployment state must not be inferred from either statement.",
     "No WordPress, Cloudflare, D1, DNS, deployment, secret, redirect, listing, or indexation change is authorized by this state file.",

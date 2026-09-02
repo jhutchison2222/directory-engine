@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "niche_domain": "example-water-heater-repair.com",
+  "country": "US",
+  "service_taxonomy": ["water-heater-repair"],
+  "canonical_urls": [],
+  "listings": [],
+  "redirects": [
+    {
+      "from": "/denver-metro/acme-plumbing/",
+      "to": "/colorado/denver/acme-plumbing-denver/",
+      "reason": "Target is not a declared canonical URL.",
+      "status": 301
+    }
+  ]
+}

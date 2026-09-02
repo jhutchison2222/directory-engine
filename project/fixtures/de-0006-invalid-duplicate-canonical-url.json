@@ -6,7 +6,20 @@
   "canonical_urls": [
     {
       "path": "/colorado/denver/",
-      "kind": "state",
+      "kind": "city",
+      "indexable": false,
+      "sitemap_eligible": false,
+      "indexation_readiness": {
+        "has_listings": false,
+        "data_quality_checked": false,
+        "has_unique_content": false,
+        "canonical_validated": false,
+        "internally_linked": false
+      }
+    },
+    {
+      "path": "/colorado/denver/",
+      "kind": "city",
       "indexable": false,
       "sitemap_eligible": false,
       "indexation_readiness": {

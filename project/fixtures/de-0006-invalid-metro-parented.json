@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "niche_domain": "example-water-heater-repair.com",
-  "service_taxonomy": ["water-heater-repair"],
+  "country": "US",
+  "service_taxonomy": ["water-heater-repair", "drain-cleaning"],
   "canonical_urls": [],
   "listings": [
     {
@@ -12,16 +13,7 @@
       "city": "denver",
       "served_areas": ["denver"],
       "metro": "denver-metro",
-      "services": ["drain-cleaning"],
-      "indexable": false,
-      "sitemap_eligible": false,
-      "indexation_readiness": {
-        "has_listings": false,
-        "data_quality_checked": false,
-        "has_unique_content": false,
-        "canonical_validated": false,
-        "internally_linked": false
-      }
+      "services": ["drain-cleaning"]
     }
   ],
   "redirects": []

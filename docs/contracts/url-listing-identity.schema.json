@@ -7,6 +7,7 @@
   "required": [
     "schema_version",
     "niche_domain",
+    "country",
     "service_taxonomy",
     "canonical_urls",
     "listings",
@@ -19,6 +20,7 @@
       "minLength": 1,
       "pattern": "^[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)*\\.[a-z]{2,}$"
     },
+    "country": { "const": "US" },
     "service_taxonomy": {
       "type": "array",
       "items": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" }
@@ -28,10 +30,30 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "kind"],
+        "required": ["path", "kind", "indexable", "sitemap_eligible", "indexation_readiness"],
         "properties": {
           "path": { "type": "string", "minLength": 1 },
-          "kind": { "enum": ["state", "city", "neighborhood", "service_area", "business"] }
+          "kind": { "enum": ["state", "city", "neighborhood", "service_area", "business"] },
+          "indexable": { "type": "boolean" },
+          "sitemap_eligible": { "type": "boolean" },
+          "indexation_readiness": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "has_listings",
+              "data_quality_checked",
+              "has_unique_content",
+              "canonical_validated",
+              "internally_linked"
+            ],
+            "properties": {
+              "has_listings": { "type": "boolean" },
+              "data_quality_checked": { "type": "boolean" },
+              "has_unique_content": { "type": "boolean" },
+              "canonical_validated": { "type": "boolean" },
+              "internally_linked": { "type": "boolean" }
+            }
+          }
         }
       }
     },
@@ -48,10 +70,7 @@
           "city",
           "served_areas",
           "metro",
-          "services",
-          "indexable",
-          "sitemap_eligible",
-          "indexation_readiness"
+          "services"
         ],
         "properties": {
           "branch_id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
@@ -72,26 +91,6 @@
           "services": {
             "type": "array",
             "items": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" }
-          },
-          "indexable": { "type": "boolean" },
-          "sitemap_eligible": { "type": "boolean" },
-          "indexation_readiness": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "has_listings",
-              "data_quality_checked",
-              "has_unique_content",
-              "canonical_validated",
-              "internally_linked"
-            ],
-            "properties": {
-              "has_listings": { "type": "boolean" },
-              "data_quality_checked": { "type": "boolean" },
-              "has_unique_content": { "type": "boolean" },
-              "canonical_validated": { "type": "boolean" },
-              "internally_linked": { "type": "boolean" }
-            }
           }
         }
       }

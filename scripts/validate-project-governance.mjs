@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { validateRemediationFixture } from "./lib/validate-remediation-fixture.mjs";
 import { assertValidAgainstSchema } from "./lib/json-schema-lite.mjs";
 import { assertValidUrlListingIdentity } from "./lib/validate-url-listing-identity.mjs";
+import { assertRecursiveFailClosed } from "./lib/schema-fail-closed.mjs";
 import { readJsonFile } from "./lib/read-json-file.mjs";
 import { findFieldById } from "./lib/work-packet-template.mjs";
 import { buildRemediationCycleOptions } from "./lib/remediation-cycles.mjs";
@@ -42,11 +43,12 @@ const requireCondition = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 
-requireCondition(workPacketSchema.additionalProperties === false, "work-packet schema must fail closed on unknown properties");
-requireCondition(projectStateSchema.additionalProperties === false, "project-state schema must fail closed on unknown properties");
+assertRecursiveFailClosed(workPacketSchema, "work-packet schema");
+assertRecursiveFailClosed(projectStateSchema, "project-state schema");
+assertRecursiveFailClosed(urlListingIdentitySchema, "url-listing-identity schema");
 requireCondition(
-  urlListingIdentitySchema.additionalProperties === false,
-  "url-listing-identity schema must fail closed on unknown properties",
+  urlListingIdentitySchema.properties?.country?.const === "US",
+  'url-listing-identity schema must require country to be exactly "US"',
 );
 
 assertValidAgainstSchema(projectStateSchema, state, "project/current-state.json");
