@@ -92,10 +92,15 @@ function containsCredentialMaterial(value) {
 
 /**
  * Validates that `origin` is a bare https scheme+host origin: no path,
- * query, fragment, userinfo/credentials, explicit port, or wildcard. Unlike
- * DE-0008's canonical registry origin, a legacy origin is not restricted to a
- * bare apex/www host free of geography terms, since a per-metro legacy
- * domain name is exactly the pre-existing identity this inventory records.
+ * query, fragment, userinfo/credentials, explicit port, or wildcard.
+ * Userinfo detection is bounded to the authority component (the substring
+ * before the first `/`, `?`, or `#`), so an `@` inside a path, query
+ * string, or fragment is reported as the actual `origin-has-path`/
+ * `origin-has-query`/`origin-has-fragment` violation rather than being
+ * misread as embedded credentials. Unlike DE-0008's canonical registry
+ * origin, a legacy origin is not restricted to a bare apex/www host free of
+ * geography terms, since a per-metro legacy domain name is exactly the
+ * pre-existing identity this inventory records.
  */
 function validateLegacyOrigin(origin, domainId) {
   const errors = [];
@@ -109,17 +114,18 @@ function validateLegacyOrigin(origin, domainId) {
     return errors;
   }
 
-  let rest = origin.slice("https://".length);
-  const credentialsIndex = rest.indexOf("@");
+  const rest = origin.slice("https://".length);
+  const specialIndex = rest.search(/[/?#]/);
+  const authority = specialIndex === -1 ? rest : rest.slice(0, specialIndex);
+
+  const credentialsIndex = authority.indexOf("@");
+  const hostAndPort = credentialsIndex === -1 ? authority : authority.slice(credentialsIndex + 1);
   if (credentialsIndex !== -1) {
     errors.push(
       `origin-has-credentials: legacy domain "${domainId}" origin "${origin}" must not embed userinfo/credentials`,
     );
-    rest = rest.slice(credentialsIndex + 1);
   }
 
-  const specialIndex = rest.search(/[/?#]/);
-  const hostAndPort = specialIndex === -1 ? rest : rest.slice(0, specialIndex);
   if (specialIndex !== -1) {
     const marker = rest[specialIndex];
     if (marker === "/") {

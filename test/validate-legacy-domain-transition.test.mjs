@@ -25,6 +25,9 @@ const INVALID_FIXTURES = [
   ["de-0009-invalid-origin-has-query.json", "origin-has-query"],
   ["de-0009-invalid-origin-has-fragment.json", "origin-has-fragment"],
   ["de-0009-invalid-origin-has-credentials.json", "origin-has-credentials"],
+  ["de-0009-invalid-origin-at-in-path.json", "origin-has-path"],
+  ["de-0009-invalid-origin-at-in-query.json", "origin-has-query"],
+  ["de-0009-invalid-origin-at-in-fragment.json", "origin-has-fragment"],
   ["de-0009-invalid-origin-has-port.json", "origin-has-port"],
   ["de-0009-invalid-origin-has-wildcard.json", "origin-has-wildcard"],
   ["de-0009-invalid-self-target.json", "self-target"],
@@ -217,6 +220,35 @@ describe("evidence-reference structure", () => {
       .find((value) => value.includes("query string only, no userinfo"));
     expect(citation).toContain("https://internal.example?case:412@2026-08-20");
     expect(validateLegacyDomainTransition(fixture, registryFixture)).toEqual([]);
+  });
+});
+
+describe("origin userinfo detection is bounded to the authority", () => {
+  it("reports origin-has-path, not origin-has-credentials, for an @ inside the path", async () => {
+    const fixture = await loadFixture("de-0009-invalid-origin-at-in-path.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("origin-has-path:"))).toBe(true);
+    expect(errors.some((message) => message.startsWith("origin-has-credentials:"))).toBe(false);
+  });
+
+  it("reports origin-has-query, not origin-has-credentials, for an @ inside the query string", async () => {
+    const fixture = await loadFixture("de-0009-invalid-origin-at-in-query.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("origin-has-query:"))).toBe(true);
+    expect(errors.some((message) => message.startsWith("origin-has-credentials:"))).toBe(false);
+  });
+
+  it("reports origin-has-fragment, not origin-has-credentials, for an @ inside the fragment", async () => {
+    const fixture = await loadFixture("de-0009-invalid-origin-at-in-fragment.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("origin-has-fragment:"))).toBe(true);
+    expect(errors.some((message) => message.startsWith("origin-has-credentials:"))).toBe(false);
+  });
+
+  it("still reports origin-has-credentials for an @ inside the authority", async () => {
+    const fixture = await loadFixture("de-0009-invalid-origin-has-credentials.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("origin-has-credentials:"))).toBe(true);
   });
 });
 

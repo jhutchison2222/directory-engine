@@ -82,7 +82,11 @@ origin:
   **origin-has-query**; a fragment is **origin-has-fragment**.
 - Embedded userinfo (`user:pass@host`) is **origin-has-credentials**; an
   explicit port (`:8443`) is **origin-has-port**; a `*` anywhere in the value
-  is **origin-has-wildcard**.
+  is **origin-has-wildcard**. Userinfo detection is bounded to the origin's
+  authority component (the substring before the first `/`, `?`, or `#`), so
+  an `@` inside a path, query string, or fragment is reported as the actual
+  **origin-has-path**/**origin-has-query**/**origin-has-fragment** violation,
+  not misread as embedded credentials.
 
 Unlike DE-0008's canonical registry origin, a legacy origin is not required to
 be a bare apex or `www` host free of geography terms — a per-metro or
@@ -234,3 +238,13 @@ values deliberately include legitimate prose such as "Colorado Secretary of
 State", "the bearer of this deed", "Authorization: city clerk", and a URL
 with a query string (rather than embedded userinfo) containing a colon and
 an `@`, none of which trip the credential guard.
+
+The authority-bounded userinfo detection in `validateLegacyOrigin` is proven
+by `de-0009-invalid-origin-at-in-path.json`,
+`de-0009-invalid-origin-at-in-query.json`, and
+`de-0009-invalid-origin-at-in-fragment.json`: each places a synthetic `@` in
+the origin's path, query string, or fragment respectively, and each is
+asserted to report the actual **origin-has-path**/**origin-has-query**/
+**origin-has-fragment** category rather than **origin-has-credentials**.
+`de-0009-invalid-origin-has-credentials.json` continues to prove that an `@`
+actually inside the authority is still caught.
