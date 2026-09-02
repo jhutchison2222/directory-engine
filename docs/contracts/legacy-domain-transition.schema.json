@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://directory-engine.invalid/schemas/legacy-domain-transition.schema.json",
+  "title": "Directory Engine legacy-domain inventory and transition contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "country", "legacy_domains"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "country": { "const": "US" },
+    "legacy_domains": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["legacy_domain_id", "origin", "source_geography", "current_evidence", "transition_plan"],
+        "properties": {
+          "legacy_domain_id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          "origin": { "type": "string", "minLength": 1 },
+          "source_geography": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state"],
+            "properties": {
+              "state": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(-[a-z]+)*$" },
+              "metro": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(-[a-z]+)*$" }
+            }
+          },
+          "current_evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidence_type", "observed_subject", "observed_state", "captured_at", "reference"],
+            "properties": {
+              "evidence_type": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(_[a-z]+)*$" },
+              "observed_subject": { "type": "string", "minLength": 1 },
+              "observed_state": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(_[a-z]+)*$" },
+              "captured_at": { "type": "string", "format": "date-time" },
+              "reference": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["reference_type", "recorded_by", "citation"],
+                "properties": {
+                  "reference_type": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(_[a-z]+)*$" },
+                  "recorded_by": { "type": "string", "minLength": 1 },
+                  "citation": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          },
+          "transition_plan": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["disposition", "rationale"],
+            "properties": {
+              "disposition": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(_[a-z]+)*$" },
+              "redirect_target": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["niche_id", "site_id", "origin"],
+                "properties": {
+                  "niche_id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+                  "site_id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+                  "origin": { "type": "string", "minLength": 1 }
+                }
+              },
+              "rationale": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

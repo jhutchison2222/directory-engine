@@ -1,18 +1,19 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-02T18:47:10Z",
+  "updated_at": "2026-09-02T19:22:26Z",
   "accepted_architecture": "ADR-001-national-niche-domains",
-  "repository_baseline": "3be9046311e785737d4fb23783dc71a8aa83b0f4",
+  "repository_baseline": "45b94d5d8b341dcc8a107bdcc3817e45a2e42177",
   "repository_capability": "contains_write_paths",
   "deployed_capability": "unverified",
   "automation_phase": "code_only",
   "auto_merge_enabled": false,
   "production_mutations_authorized": false,
-  "active_work_packet": "DE-0008",
-  "next_step": "Remediated the second Codex exact-head review cycle on PR #22: replaced the curated, non-exhaustive metro-name blocklist as the sole geography/identity-conflation authority with an explicit, contract-declared allowlist of recognized service-taxonomy tokens (RECOGNIZED_IDENTITY_TOKENS) and a word-decomposition fail-closed backstop (unrecognized-identity-token), so niche_id, site_id, and origin domain labels fail closed on any unrecognized token, not just ones on the curated list, including city names absent from that list (aurora) and geography concatenated without a hyphen (denverplumbingfinder). Await Codex's exact-head review of this remediation and complete any remaining remediation cycles.",
+  "active_work_packet": "DE-0009",
+  "next_step": "Remediated Codex exact-head review findings on the DE-0009 legacy-domain inventory and transition contract: current_evidence now carries an explicit observed_subject and a typed, attributable reference (reference_type, recorded_by, citation) that fails closed on credential/secret material and blank attribution; transition_plan.disposition now covers undecided, retain_temporarily, redirect_planned, park_planned, and retire_planned; and every legacy-domain fixture origin now uses the RFC 2606-reserved .example TLD so no fixture reads as a claim about a real, live domain, while a redirect_planned target still cross-validates against the real DE-0008 canonical registry fixture. Await Codex's exact-head review of this remediation and complete any remaining remediation cycles; no domain inventory action, DNS change, redirect execution, parking, or retirement is authorized by this contract.",
   "notes": [
     "The repository README still describes v0.2.0 as read-only while current main contains write-path source code; deployment state must not be inferred from either statement.",
     "No WordPress, Cloudflare, D1, DNS, deployment, secret, redirect, listing, or indexation change is authorized by this state file.",
-    "DE-0002's exact-head Project governance run 33555688873 ended without executing a job and did not prove the maker/CI/reviewer/remediation/delta loop end to end. DE-0004 (PR #13) and the App-authenticated exact-head Project governance runs on PR #14 proved the corrected CI path. DE-0006 defined the nationwide URL and listing identity contract and its semantic validator; DE-0007 remediated post-merge audit findings in that same validator and is merged onto main. DE-0008 is the current active, code-only work packet defining the nationwide niche-site registry contract (one canonical site per niche, kept independent of geography and of the DE-0006 in-domain URL/listing identity). None of these authorize any staging, production, or live-system operation."
+    "DE-0002's exact-head Project governance run 33555688873 ended without executing a job and did not prove the maker/CI/reviewer/remediation/delta loop end to end. DE-0004 (PR #13) and the App-authenticated exact-head Project governance runs on PR #14 proved the corrected CI path. DE-0006 defined the nationwide URL and listing identity contract and its semantic validator; DE-0007 remediated post-merge audit findings in that same validator and is merged onto main. DE-0008 defined the nationwide niche-site registry contract (one canonical site per niche, kept independent of geography and of the DE-0006 in-domain URL/listing identity) and is merged onto main. DE-0009 is the current active, code-only work packet defining the legacy pre-ADR-001 per-metro domain inventory and transition-plan contract, per ADR-001's consequence that existing metro domains must be inventoried before parking, redirecting, or retiring them; this is its first remediation cycle (1/3). None of these authorize any staging, production, or live-system operation."
   ]
 }
+
