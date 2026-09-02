@@ -47,12 +47,42 @@ const RECOGNIZED_DISPOSITIONS = new Set([
 
 const RECOGNIZED_REFERENCE_TYPES = new Set(["internal_note", "internal_log_excerpt", "external_registrar_record"]);
 
-// Detects credential/secret material so an evidence reference can never carry
-// a live credential: a URL with embedded userinfo, or a common secret-bearing
-// keyword. Intentionally broad and fails closed on any match.
-const CREDENTIAL_URL_PATTERN = /:\/\/[^\s/]*:[^\s/@]*@/;
-const CREDENTIAL_KEYWORD_PATTERN =
-  /(password|passwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|bearer\s|authorization\s*:|-----begin)/i;
+// Raw vendor/access-key token shapes that identify a live credential by
+// shape alone, independent of any surrounding keyword: GitHub personal-
+// access tokens (classic `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and fine-grained
+// `github_pat_`), OpenAI-style `sk-` secret keys, AWS `AKIA` access-key IDs,
+// and Slack `xox`-prefixed tokens.
+const TOKEN_SHAPE_PATTERN =
+  "(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})";
+
+// Detects credential/secret material so a persisted free-text field can never
+// carry a live credential: a URL with embedded userinfo (bounded to the
+// authority component, so a colon/`@` pair inside a path, query, or fragment
+// does not false-positive), a raw vendor/access-key token shape, or a
+// secret-bearing keyword. Any non-empty userinfo before `@` in the authority
+// is treated as a live credential, whether or not it contains a colon and
+// whether or not it happens to match a recognized vendor-token shape — an
+// opaque, unrecognized token in a URL's authority is just as much a live
+// credential as a `user:pass` pair or a known vendor-token shape. Each
+// keyword is context-bound so legitimate prose is not misread as a
+// credential: bare dictionary words like "secret" or "password" require a
+// word boundary (so "Secretary" does not match "secret"), "bearer" only
+// fires when followed by a token-shaped run of characters (so "bearer of
+// this deed" does not match), and "authorization:" only fires when followed
+// by the "Bearer" or "Basic" scheme (so "Authorization: city clerk" does not
+// match). Fails closed on any match.
+const CREDENTIAL_URL_PATTERN = /:\/\/[^\s/?#]+@/;
+const CREDENTIAL_KEYWORD_PATTERN = new RegExp(
+  [
+    "\\b(?:password|passwd|secrets?|api[_-]?keys?|access[_-]?keys?|private[_-]?keys?)\\b",
+    "\\bbearer\\s+[A-Za-z0-9._~+/=-]{8,}",
+    "\\bauthorization\\s*:\\s*(?:bearer|basic)\\b",
+    "-----begin",
+    TOKEN_SHAPE_PATTERN,
+    "\\btoken\\s*=\\s*\\S+",
+  ].join("|"),
+  "i",
+);
 
 function containsCredentialMaterial(value) {
   return CREDENTIAL_URL_PATTERN.test(value) || CREDENTIAL_KEYWORD_PATTERN.test(value);
@@ -60,10 +90,15 @@ function containsCredentialMaterial(value) {
 
 /**
  * Validates that `origin` is a bare https scheme+host origin: no path,
- * query, fragment, userinfo/credentials, explicit port, or wildcard. Unlike
- * DE-0008's canonical registry origin, a legacy origin is not restricted to a
- * bare apex/www host free of geography terms, since a per-metro legacy
- * domain name is exactly the pre-existing identity this inventory records.
+ * query, fragment, userinfo/credentials, explicit port, or wildcard.
+ * Userinfo detection is bounded to the authority component (the substring
+ * before the first `/`, `?`, or `#`), so an `@` inside a path, query
+ * string, or fragment is reported as the actual `origin-has-path`/
+ * `origin-has-query`/`origin-has-fragment` violation rather than being
+ * misread as embedded credentials. Unlike DE-0008's canonical registry
+ * origin, a legacy origin is not restricted to a bare apex/www host free of
+ * geography terms, since a per-metro legacy domain name is exactly the
+ * pre-existing identity this inventory records.
  */
 function validateLegacyOrigin(origin, domainId) {
   const errors = [];
@@ -77,17 +112,18 @@ function validateLegacyOrigin(origin, domainId) {
     return errors;
   }
 
-  let rest = origin.slice("https://".length);
-  const credentialsIndex = rest.indexOf("@");
+  const rest = origin.slice("https://".length);
+  const specialIndex = rest.search(/[/?#]/);
+  const authority = specialIndex === -1 ? rest : rest.slice(0, specialIndex);
+
+  const credentialsIndex = authority.indexOf("@");
+  const hostAndPort = credentialsIndex === -1 ? authority : authority.slice(credentialsIndex + 1);
   if (credentialsIndex !== -1) {
     errors.push(
       `origin-has-credentials: legacy domain "${domainId}" origin "${origin}" must not embed userinfo/credentials`,
     );
-    rest = rest.slice(credentialsIndex + 1);
   }
 
-  const specialIndex = rest.search(/[/?#]/);
-  const hostAndPort = specialIndex === -1 ? rest : rest.slice(0, specialIndex);
   if (specialIndex !== -1) {
     const marker = rest[specialIndex];
     if (marker === "/") {
@@ -214,7 +250,13 @@ export function validateLegacyDomainTransition(contract, registryContract) {
       );
     }
 
-    const { disposition, redirect_target: redirectTarget } = record.transition_plan;
+    const { disposition, redirect_target: redirectTarget, rationale } = record.transition_plan;
+
+    if (containsCredentialMaterial(rationale)) {
+      errors.push(
+        `rationale-credential: legacy domain "${record.legacy_domain_id}" transition_plan.rationale must not embed credential or secret material`,
+      );
+    }
 
     if (!RECOGNIZED_DISPOSITIONS.has(disposition)) {
       errors.push(

@@ -82,7 +82,11 @@ origin:
   **origin-has-query**; a fragment is **origin-has-fragment**.
 - Embedded userinfo (`user:pass@host`) is **origin-has-credentials**; an
   explicit port (`:8443`) is **origin-has-port**; a `*` anywhere in the value
-  is **origin-has-wildcard**.
+  is **origin-has-wildcard**. Userinfo detection is bounded to the origin's
+  authority component (the substring before the first `/`, `?`, or `#`), so
+  an `@` inside a path, query string, or fragment is reported as the actual
+  **origin-has-path**/**origin-has-query**/**origin-has-fragment** violation,
+  not misread as embedded credentials.
 
 Unlike DE-0008's canonical registry origin, a legacy origin is not required to
 be a bare apex or `www` host free of geography terms — a per-metro or
@@ -125,10 +129,23 @@ attributable for the observation:
     (empty or whitespace-only) value for either is a
     **missing-evidence-attribution** violation.
   - Neither `recorded_by` nor `citation` may embed credential or secret
-    material — URL userinfo (`user:pass@host`) or a secret-bearing keyword
-    (for example `password`, `api_key`, `bearer `, `-----BEGIN`). Either is an
+    material — URL userinfo (any non-empty authority userinfo before `@`,
+    whether or not it contains a colon and whether or not it matches a
+    recognized vendor-token shape), a raw vendor/access-key token (GitHub
+    `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`, OpenAI-style `sk-`, AWS
+    `AKIA...`, or Slack `xox...`), a `token=...` assignment, or another
+    secret-bearing keyword (for example `password`, `api_key`, a `Bearer`
+    token, or `-----BEGIN`). Any of these is an
     **evidence-reference-credential** violation, since an evidence citation
-    must never carry a live credential.
+    must never carry a live credential. This detection is context-bound, not
+    a bare substring match: a dictionary word like `secret` or `password`
+    must appear as its own word (so "Colorado Secretary of State" is not
+    flagged), `bearer` only matches when followed by a token-shaped value (so
+    "bearer of this deed" is not flagged), an `authorization:` prefix only
+    matches when followed by the `Bearer` or `Basic` scheme (so
+    "Authorization: city clerk" is not flagged), and URL userinfo detection
+    is bounded to a URL's authority component (so a colon/`@` pair inside a
+    path, query string, or fragment is not misread as embedded credentials).
 
 ## Transition plan
 
@@ -155,7 +172,10 @@ attributable for the observation:
   cannot be planned to redirect to itself.
 - `rationale` is a required, non-empty explanation of the proposed
   disposition. This contract records the proposal only; it does not execute
-  any redirect, parking, or retirement.
+  any redirect, parking, or retirement. Like `current_evidence.reference`,
+  `rationale` is unconstrained free text, so it is scanned for the same
+  context-bound credential/secret material described under "Evidence"
+  above; a match is a **rationale-credential** violation.
 
 ## Machine-readable schema
 
@@ -170,8 +190,9 @@ origin-has-query, origin-has-fragment, origin-has-credentials,
 origin-has-port, origin-has-wildcard, self-target, conflicting-disposition,
 non-us, unsupported-evidence, future-dated-evidence,
 evidence-plan-conflation, evidence-subject-mismatch,
-evidence-reference-credential, missing-evidence-attribution, and
-target-mismatch), so `scripts/lib/validate-legacy-domain-transition.mjs`
+evidence-reference-credential, rationale-credential,
+missing-evidence-attribution, and target-mismatch), so
+`scripts/lib/validate-legacy-domain-transition.mjs`
 implements those checks and fails closed — any violation is reported, not
 silently accepted. `scripts/lib/schema-fail-closed.mjs` implements the
 recursive `additionalProperties: false` check that `check:governance` runs
@@ -185,11 +206,49 @@ representative valid inventory document with one entry per recognized
 a record actually present in
 `project/fixtures/de-0008-niche-site-registry.valid.json`.
 `project/fixtures/de-0009-invalid-*.json` each contain a deliberate
-violation, one file per fail-closed category listed above, plus
-`de-0009-invalid-country-not-us.json` for the internal country identity
-requirement, `de-0009-invalid-unsupported-root-property.json` /
-`de-0009-invalid-unsupported-nested-property.json` proving the recursive
+violation, one file per fail-closed category listed above (including
+`de-0009-invalid-rationale-credential.json` for the **rationale-credential**
+category), plus `de-0009-invalid-country-not-us.json` for the internal
+country identity requirement, `de-0009-invalid-unsupported-root-property.json`
+/ `de-0009-invalid-unsupported-nested-property.json` proving the recursive
 `additionalProperties: false` schema constraint rejects an undeclared field
 at the document root and inside a nested object respectively, and
 `de-0009-invalid-evidence-missing-subject.json` proving the schema requires
 `observed_subject`.
+
+The **evidence-reference-credential** category is additionally proven by
+`de-0009-invalid-evidence-reference-credential-token-url.json` (a bare,
+vendor-token-shaped userinfo before `@` with no colon, in `citation`),
+`de-0009-invalid-evidence-reference-credential-generic-token-url.json` (a
+bare, non-vendor-shaped, generic userinfo before `@` with no colon, in
+`citation` — proving the guard rejects any non-empty authority userinfo, not
+only recognized vendor-token shapes),
+`de-0009-invalid-evidence-reference-credential-raw-token.json` (a raw AWS-style
+access-key token in `recorded_by`),
+`de-0009-invalid-evidence-reference-credential-raw-token-citation.json` (a raw
+Slack-style token in `citation`), and
+`de-0009-invalid-evidence-reference-credential-token-assignment.json` (a
+`token=...` assignment in `citation`) — each using an obviously synthetic
+value. The **unsupported-evidence** category is additionally proven by
+`de-0009-invalid-unsupported-reference-type.json` (an unrecognized
+`reference.reference_type`), and the **missing-evidence-attribution** category
+is additionally proven by `de-0009-invalid-blank-citation.json` (a
+blank/whitespace-only `citation` with a non-blank `recorded_by`).
+
+`de-0009-legacy-domain-transition.valid.json` also doubles as the
+false-positive regression fixture for the context-bound credential
+detection described under "Evidence" above: its `citation` and `rationale`
+values deliberately include legitimate prose such as "Colorado Secretary of
+State", "the bearer of this deed", "Authorization: city clerk", and a URL
+with a query string (rather than embedded userinfo) containing a colon and
+an `@`, none of which trip the credential guard.
+
+The authority-bounded userinfo detection in `validateLegacyOrigin` is proven
+by `de-0009-invalid-origin-at-in-path.json`,
+`de-0009-invalid-origin-at-in-query.json`, and
+`de-0009-invalid-origin-at-in-fragment.json`: each places a synthetic `@` in
+the origin's path, query string, or fragment respectively, and each is
+asserted to report the actual **origin-has-path**/**origin-has-query**/
+**origin-has-fragment** category rather than **origin-has-credentials**.
+`de-0009-invalid-origin-has-credentials.json` continues to prove that an `@`
+actually inside the authority is still caught.

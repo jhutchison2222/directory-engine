@@ -25,6 +25,9 @@ const INVALID_FIXTURES = [
   ["de-0009-invalid-origin-has-query.json", "origin-has-query"],
   ["de-0009-invalid-origin-has-fragment.json", "origin-has-fragment"],
   ["de-0009-invalid-origin-has-credentials.json", "origin-has-credentials"],
+  ["de-0009-invalid-origin-at-in-path.json", "origin-has-path"],
+  ["de-0009-invalid-origin-at-in-query.json", "origin-has-query"],
+  ["de-0009-invalid-origin-at-in-fragment.json", "origin-has-fragment"],
   ["de-0009-invalid-origin-has-port.json", "origin-has-port"],
   ["de-0009-invalid-origin-has-wildcard.json", "origin-has-wildcard"],
   ["de-0009-invalid-self-target.json", "self-target"],
@@ -38,7 +41,15 @@ const INVALID_FIXTURES = [
   ["de-0009-invalid-evidence-subject-mismatch.json", "evidence-subject-mismatch"],
   ["de-0009-invalid-evidence-reference-credential-url.json", "evidence-reference-credential"],
   ["de-0009-invalid-evidence-reference-credential-keyword.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-token-url.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-generic-token-url.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-raw-token.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-raw-token-citation.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-token-assignment.json", "evidence-reference-credential"],
+  ["de-0009-invalid-rationale-credential.json", "rationale-credential"],
   ["de-0009-invalid-missing-evidence-attribution.json", "missing-evidence-attribution"],
+  ["de-0009-invalid-blank-citation.json", "missing-evidence-attribution"],
+  ["de-0009-invalid-unsupported-reference-type.json", "unsupported-evidence"],
   ["de-0009-invalid-disposition-unrecognized.json", "conflicting-disposition"],
 ];
 
@@ -143,10 +154,108 @@ describe("evidence-reference structure", () => {
     expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
   });
 
+  it("rejects a reference citation embedding a bare, token-only URL userinfo (no colon)", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-token-url.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a reference citation embedding a generic, non-vendor-shaped URL userinfo (no colon)", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-generic-token-url.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a reference recorded_by embedding a raw vendor access-key token", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-raw-token.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a reference citation embedding a raw vendor access-key token", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-raw-token-citation.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a reference citation embedding a token=... assignment", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-token-assignment.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects an unsupported reference.reference_type", async () => {
+    const fixture = await loadFixture("de-0009-invalid-unsupported-reference-type.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("unsupported-evidence:"))).toBe(true);
+  });
+
+  it("rejects a blank (whitespace-only) citation as missing attribution", async () => {
+    const fixture = await loadFixture("de-0009-invalid-blank-citation.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("missing-evidence-attribution:"))).toBe(true);
+  });
+
+  it("rejects a transition_plan.rationale embedding a secret keyword", async () => {
+    const fixture = await loadFixture("de-0009-invalid-rationale-credential.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("rationale-credential:"))).toBe(true);
+  });
+
   it("rejects a blank recorded_by as missing attribution", async () => {
     const fixture = await loadFixture("de-0009-invalid-missing-evidence-attribution.json");
     const errors = validateLegacyDomainTransition(fixture, registryFixture);
     expect(errors.some((message) => message.startsWith("missing-evidence-attribution:"))).toBe(true);
+  });
+
+  it("does not flag legitimate prose that merely contains a credential-adjacent word", async () => {
+    const fixture = await loadFixture("de-0009-legacy-domain-transition.valid.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(false);
+    expect(errors.some((message) => message.startsWith("rationale-credential:"))).toBe(false);
+    const citations = fixture.legacy_domains.map((entry) => entry.current_evidence.reference.citation);
+    expect(citations.some((citation) => citation.includes("Colorado Secretary of State"))).toBe(true);
+    expect(citations.some((citation) => citation.includes("Authorization: city clerk"))).toBe(true);
+    const rationales = fixture.legacy_domains.map((entry) => entry.transition_plan.rationale);
+    expect(rationales.some((rationale) => rationale.includes("the bearer of this deed"))).toBe(true);
+  });
+
+  it("does not flag a URL query string containing a colon and an @ outside any userinfo", async () => {
+    const fixture = await loadFixture("de-0009-legacy-domain-transition.valid.json");
+    const citation = fixture.legacy_domains
+      .map((entry) => entry.current_evidence.reference.citation)
+      .find((value) => value.includes("query string only, no userinfo"));
+    expect(citation).toContain("https://internal.example?case:412@2026-08-20");
+    expect(validateLegacyDomainTransition(fixture, registryFixture)).toEqual([]);
+  });
+});
+
+describe("origin userinfo detection is bounded to the authority", () => {
+  it("reports origin-has-path, not origin-has-credentials, for an @ inside the path", async () => {
+    const fixture = await loadFixture("de-0009-invalid-origin-at-in-path.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("origin-has-path:"))).toBe(true);
+    expect(errors.some((message) => message.startsWith("origin-has-credentials:"))).toBe(false);
+  });
+
+  it("reports origin-has-query, not origin-has-credentials, for an @ inside the query string", async () => {
+    const fixture = await loadFixture("de-0009-invalid-origin-at-in-query.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("origin-has-query:"))).toBe(true);
+    expect(errors.some((message) => message.startsWith("origin-has-credentials:"))).toBe(false);
+  });
+
+  it("reports origin-has-fragment, not origin-has-credentials, for an @ inside the fragment", async () => {
+    const fixture = await loadFixture("de-0009-invalid-origin-at-in-fragment.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("origin-has-fragment:"))).toBe(true);
+    expect(errors.some((message) => message.startsWith("origin-has-credentials:"))).toBe(false);
+  });
+
+  it("still reports origin-has-credentials for an @ inside the authority", async () => {
+    const fixture = await loadFixture("de-0009-invalid-origin-has-credentials.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("origin-has-credentials:"))).toBe(true);
   });
 });
 
