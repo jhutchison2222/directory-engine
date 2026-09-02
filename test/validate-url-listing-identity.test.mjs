@@ -21,6 +21,7 @@ const INVALID_FIXTURES = [
   ["de-0006-invalid-country-prefixed.json", "country-prefixed"],
   ["de-0006-invalid-metro-parented.json", "metro-parented"],
   ["de-0006-invalid-metro-parented-url.json", "metro-parented"],
+  ["de-0006-invalid-metro-parented-neighborhood-url.json", "metro-parented"],
   ["de-0006-invalid-service-in-business-url.json", "service-in-business-url"],
   ["de-0006-invalid-duplicate-branch.json", "duplicate-branch"],
   ["de-0006-invalid-unsafe-indexation.json", "unsafe-indexation"],
@@ -75,5 +76,30 @@ describe("internal country identity", () => {
     for (const url of fixture.canonical_urls) {
       expect(url.path.split("/")).not.toContain("us");
     }
+  });
+});
+
+describe("redirect-cycle reports one violation per distinct logical cycle", () => {
+  it("reports exactly one redirect-cycle violation for a three-node cycle", async () => {
+    const fixture = await loadFixture("de-0006-invalid-redirect-cycle-three-node.json");
+    const errors = validateUrlListingIdentity(fixture);
+    const cycleErrors = errors.filter((message) => message.startsWith("redirect-cycle:"));
+    expect(cycleErrors).toHaveLength(1);
+  });
+
+  it("reports exactly one redirect-cycle violation for a two-node cycle", async () => {
+    const fixture = await loadFixture("de-0006-invalid-redirect-cycle.json");
+    const errors = validateUrlListingIdentity(fixture);
+    const cycleErrors = errors.filter((message) => message.startsWith("redirect-cycle:"));
+    expect(cycleErrors).toHaveLength(1);
+  });
+});
+
+describe("service_area path with invalid depth", () => {
+  it("reports the ambiguous depth violation without a spurious unknown-service diagnostic", async () => {
+    const fixture = await loadFixture("de-0006-invalid-service-area-invalid-depth.json");
+    const errors = validateUrlListingIdentity(fixture);
+    expect(errors.some((message) => message.startsWith("ambiguous:"))).toBe(true);
+    expect(errors.some((message) => message.startsWith("unknown-service:"))).toBe(false);
   });
 });

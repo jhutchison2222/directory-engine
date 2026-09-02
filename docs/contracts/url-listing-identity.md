@@ -171,3 +171,16 @@ independent branch — for example, a `canonical_urls` entry parented under a
 metro slug versus a listing `canonical_path` parented under one, or a page
 marked indexable with unmet readiness signals versus one with no backing
 listing at all.
+
+`de-0006-invalid-metro-parented-neighborhood-url.json` isolates the
+metro-parented check on a non-indexable `neighborhood`-kind `canonical_urls`
+entry, alongside the existing `service_area`- and listing-`canonical_path`-kind
+fixtures, so the fail-closed metro check is proven across every kind that can
+be parented under a metro slug instead of a physical city.
+`de-0006-invalid-redirect-cycle-three-node.json` isolates a three-node
+redirect cycle to prove the validator reports exactly one `redirect-cycle`
+violation per distinct cycle rather than once per node in the cycle.
+`de-0006-invalid-service-area-invalid-depth.json` isolates a `service_area`
+path with the wrong segment depth to prove the validator reports only the
+`ambiguous` depth violation, without a spurious `unknown-service` diagnostic
+computed against a leaf segment that isn't actually the service position.

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "niche_domain": "example-water-heater-repair.com",
+  "country": "US",
+  "service_taxonomy": ["water-heater-repair"],
+  "canonical_urls": [],
+  "listings": [],
+  "redirects": [
+    {
+      "from": "/colorado/denver-metro/",
+      "to": "/colorado/aurora-metro/",
+      "reason": "Superseded metro browse URL, part of a three-way cyclic mapping.",
+      "status": 301
+    },
+    {
+      "from": "/colorado/aurora-metro/",
+      "to": "/colorado/lakewood-metro/",
+      "reason": "Superseded metro browse URL, part of a three-way cyclic mapping.",
+      "status": 301
+    },
+    {
+      "from": "/colorado/lakewood-metro/",
+      "to": "/colorado/denver-metro/",
+      "reason": "Cyclic mapping back to the first superseded metro browse URL.",
+      "status": 301
+    }
+  ]
+}
