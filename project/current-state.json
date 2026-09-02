@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-02T17:15:00Z",
+  "updated_at": "2026-09-02T17:13:41Z",
   "accepted_architecture": "ADR-001-national-niche-domains",
   "repository_baseline": "d914bfb2c1a7f992010da50d1e0934ef46b1e7a5",
   "repository_capability": "contains_write_paths",
