@@ -37,7 +37,26 @@ const EXECUTION_CLAIM_TERMS = new Set([
   "configured",
 ]);
 
-const RECOGNIZED_DISPOSITIONS = new Set(["redirect_planned", "retire_planned", "monitor", "no_action_planned"]);
+const RECOGNIZED_DISPOSITIONS = new Set([
+  "undecided",
+  "retain_temporarily",
+  "redirect_planned",
+  "park_planned",
+  "retire_planned",
+]);
+
+const RECOGNIZED_REFERENCE_TYPES = new Set(["internal_note", "internal_log_excerpt", "external_registrar_record"]);
+
+// Detects credential/secret material so an evidence reference can never carry
+// a live credential: a URL with embedded userinfo, or a common secret-bearing
+// keyword. Intentionally broad and fails closed on any match.
+const CREDENTIAL_URL_PATTERN = /:\/\/[^\s/]*:[^\s/@]*@/;
+const CREDENTIAL_KEYWORD_PATTERN =
+  /(password|passwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|bearer\s|authorization\s*:|-----begin)/i;
+
+function containsCredentialMaterial(value) {
+  return CREDENTIAL_URL_PATTERN.test(value) || CREDENTIAL_KEYWORD_PATTERN.test(value);
+}
 
 /**
  * Validates that `origin` is a bare https scheme+host origin: no path,
@@ -135,12 +154,23 @@ export function validateLegacyDomainTransition(contract, registryContract) {
       );
     }
 
-    const { evidence_type: evidenceType, observed_state: observedState, captured_at: capturedAt } =
-      record.current_evidence;
+    const {
+      evidence_type: evidenceType,
+      observed_subject: observedSubject,
+      observed_state: observedState,
+      captured_at: capturedAt,
+      reference,
+    } = record.current_evidence;
 
     if (!RECOGNIZED_EVIDENCE_TYPES.has(evidenceType)) {
       errors.push(
         `unsupported-evidence: legacy domain "${record.legacy_domain_id}" current_evidence.evidence_type "${evidenceType}" is not a recognized evidence type`,
+      );
+    }
+
+    if (observedSubject.toLowerCase() !== normalizedOrigin) {
+      errors.push(
+        `evidence-subject-mismatch: legacy domain "${record.legacy_domain_id}" current_evidence.observed_subject "${observedSubject}" does not identify this entry's own origin "${record.origin}"`,
       );
     }
 
@@ -161,6 +191,26 @@ export function validateLegacyDomainTransition(contract, registryContract) {
     } else if (Date.parse(capturedAt) > Date.now()) {
       errors.push(
         `future-dated-evidence: legacy domain "${record.legacy_domain_id}" current_evidence.captured_at "${capturedAt}" is in the future`,
+      );
+    }
+
+    const { reference_type: referenceType, recorded_by: recordedBy, citation } = reference;
+
+    if (!RECOGNIZED_REFERENCE_TYPES.has(referenceType)) {
+      errors.push(
+        `unsupported-evidence: legacy domain "${record.legacy_domain_id}" current_evidence.reference.reference_type "${referenceType}" is not a recognized reference type`,
+      );
+    }
+
+    if (recordedBy.trim().length === 0 || citation.trim().length === 0) {
+      errors.push(
+        `missing-evidence-attribution: legacy domain "${record.legacy_domain_id}" current_evidence.reference must declare a non-blank recorded_by and citation`,
+      );
+    }
+
+    if (containsCredentialMaterial(recordedBy) || containsCredentialMaterial(citation)) {
+      errors.push(
+        `evidence-reference-credential: legacy domain "${record.legacy_domain_id}" current_evidence.reference must not embed credential or secret material`,
       );
     }
 

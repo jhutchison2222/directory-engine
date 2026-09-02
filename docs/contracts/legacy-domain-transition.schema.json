@@ -29,11 +29,22 @@
           "current_evidence": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["evidence_type", "observed_state", "captured_at"],
+            "required": ["evidence_type", "observed_subject", "observed_state", "captured_at", "reference"],
             "properties": {
               "evidence_type": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(_[a-z]+)*$" },
+              "observed_subject": { "type": "string", "minLength": 1 },
               "observed_state": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(_[a-z]+)*$" },
-              "captured_at": { "type": "string", "format": "date-time" }
+              "captured_at": { "type": "string", "format": "date-time" },
+              "reference": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["reference_type", "recorded_by", "citation"],
+                "properties": {
+                  "reference_type": { "type": "string", "minLength": 1, "pattern": "^[a-z]+(_[a-z]+)*$" },
+                  "recorded_by": { "type": "string", "minLength": 1 },
+                  "citation": { "type": "string", "minLength": 1 }
+                }
+              }
             }
           },
           "transition_plan": {

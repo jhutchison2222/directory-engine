@@ -36,6 +36,15 @@ indexed, redirected, parked, or retired. An inventory entry records a
 historical per-metro domain identity, a factual observation about its current
 resolution state, and a *proposed* transition — never an executed one.
 
+This contract's own fixtures use per-metro legacy `origin` values under the
+`.example` TLD, reserved for documentation use by RFC 2606, so no fixture can
+be read as a factual claim about a real, registrable domain. A
+`redirect_target`, by contrast, must still name a real record in the DE-0008
+canonical registry fixture, since that is the only way to exercise
+cross-document target validation; DE-0008 already establishes that record as
+a canonical *target* identity, so referencing it here does not add a new
+factual claim.
+
 ## Legacy-domain entry shape
 
 Each entry in `legacy_domains` declares:
@@ -52,10 +61,11 @@ Each entry in `legacy_domains` declares:
   that is exactly the pre-ADR-001, per-metro pattern this inventory exists to
   retire. A `source_geography.state` value that is not a recognized United
   States state (or the District of Columbia) is a **non-us** violation.
-- `current_evidence` — a factual, observed record: `evidence_type` (how the
-  observation was made), `observed_state` (what was observed), and
-  `captured_at` (an RFC 3339 timestamp of when the observation was made). See
-  "Evidence" below.
+- `current_evidence` — a factual, observed, attributable record: `evidence_type`
+  (how the observation was made), `observed_subject` (the origin the
+  observation is about), `observed_state` (what was observed), `captured_at`
+  (an RFC 3339 timestamp of when the observation was made), and `reference`
+  (who/what recorded it and a citation). See "Evidence" below.
 - `transition_plan` — the proposed disposition: `disposition`, an optional
   `redirect_target`, and a `rationale`. See "Transition plan" below.
 
@@ -83,11 +93,16 @@ canonical identity this contract is minting.
 ## Evidence
 
 `current_evidence` records what was actually observed about a legacy domain,
-not what is planned or has been executed for it:
+not what is planned or has been executed for it, and who or what is
+attributable for the observation:
 
 - `evidence_type` must be one of the recognized observation methods
   (`dns_lookup`, `http_check`, `registrar_whois`, `manual_review`); any other
   value is an **unsupported-evidence** violation.
+- `observed_subject` explicitly names the origin the observation is about. It
+  must equal (case-insensitively) this entry's own `origin`; any other value
+  is an **evidence-subject-mismatch** violation, since evidence recorded under
+  one legacy-domain entry must describe that same entry, not another one.
 - `observed_state` must be one of the recognized neutral, factual states
   (`active_resolving`, `not_resolving`, `registrar_parked_page`, `unknown`);
   any other unrecognized value is also an **unsupported-evidence** violation.
@@ -101,13 +116,27 @@ not what is planned or has been executed for it:
 - `captured_at` must not be later than the time validation runs; a
   timestamp in the future is a **future-dated-evidence** violation, since
   evidence can only describe what has already been observed.
+- `reference` is a required, typed, attributable evidence reference:
+  - `reference_type` must be one of the recognized reference kinds
+    (`internal_note`, `internal_log_excerpt`, `external_registrar_record`);
+    any other value is an **unsupported-evidence** violation.
+  - `recorded_by` and `citation` are required, non-blank strings identifying
+    who or what recorded the evidence and citing what was reviewed. A blank
+    (empty or whitespace-only) value for either is a
+    **missing-evidence-attribution** violation.
+  - Neither `recorded_by` nor `citation` may embed credential or secret
+    material — URL userinfo (`user:pass@host`) or a secret-bearing keyword
+    (for example `password`, `api_key`, `bearer `, `-----BEGIN`). Either is an
+    **evidence-reference-credential** violation, since an evidence citation
+    must never carry a live credential.
 
 ## Transition plan
 
 `transition_plan` records a proposed disposition, never an executed one:
 
-- `disposition` must be one of `redirect_planned`, `retire_planned`,
-  `monitor`, or `no_action_planned`; any other value is a
+- `disposition` must be one of `undecided`, `retain_temporarily`,
+  `redirect_planned`, `park_planned`, or `retire_planned` — the complete,
+  non-executed transition space for a legacy domain; any other value is a
   **conflicting-disposition** violation, since the plan cannot be resolved to
   any of its supported categories.
 - `redirect_target` is required when, and only when, `disposition` is
@@ -140,23 +169,27 @@ cannot express the cross-record, cross-field, and cross-document rules above
 origin-has-query, origin-has-fragment, origin-has-credentials,
 origin-has-port, origin-has-wildcard, self-target, conflicting-disposition,
 non-us, unsupported-evidence, future-dated-evidence,
-evidence-plan-conflation, and target-mismatch), so
-`scripts/lib/validate-legacy-domain-transition.mjs` implements those checks
-and fails closed — any violation is reported, not silently accepted.
-`scripts/lib/schema-fail-closed.mjs` implements the recursive
-`additionalProperties: false` check that `check:governance` runs against this
-schema.
+evidence-plan-conflation, evidence-subject-mismatch,
+evidence-reference-credential, missing-evidence-attribution, and
+target-mismatch), so `scripts/lib/validate-legacy-domain-transition.mjs`
+implements those checks and fails closed — any violation is reported, not
+silently accepted. `scripts/lib/schema-fail-closed.mjs` implements the
+recursive `additionalProperties: false` check that `check:governance` runs
+against this schema.
 
 ## Fixtures
 
 `project/fixtures/de-0009-legacy-domain-transition.valid.json` is a
-representative valid inventory document, whose one `redirect_planned` entry
-targets a record actually present in
+representative valid inventory document with one entry per recognized
+`transition_plan.disposition` value; its one `redirect_planned` entry targets
+a record actually present in
 `project/fixtures/de-0008-niche-site-registry.valid.json`.
 `project/fixtures/de-0009-invalid-*.json` each contain a deliberate
 violation, one file per fail-closed category listed above, plus
 `de-0009-invalid-country-not-us.json` for the internal country identity
-requirement and `de-0009-invalid-unsupported-root-property.json` /
+requirement, `de-0009-invalid-unsupported-root-property.json` /
 `de-0009-invalid-unsupported-nested-property.json` proving the recursive
 `additionalProperties: false` schema constraint rejects an undeclared field
-at the document root and inside a nested object, respectively.
+at the document root and inside a nested object respectively, and
+`de-0009-invalid-evidence-missing-subject.json` proving the schema requires
+`observed_subject`.

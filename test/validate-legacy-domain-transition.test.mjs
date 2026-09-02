@@ -35,6 +35,11 @@ const INVALID_FIXTURES = [
   ["de-0009-invalid-future-dated-evidence.json", "future-dated-evidence"],
   ["de-0009-invalid-evidence-plan-conflation.json", "evidence-plan-conflation"],
   ["de-0009-invalid-target-mismatch.json", "target-mismatch"],
+  ["de-0009-invalid-evidence-subject-mismatch.json", "evidence-subject-mismatch"],
+  ["de-0009-invalid-evidence-reference-credential-url.json", "evidence-reference-credential"],
+  ["de-0009-invalid-evidence-reference-credential-keyword.json", "evidence-reference-credential"],
+  ["de-0009-invalid-missing-evidence-attribution.json", "missing-evidence-attribution"],
+  ["de-0009-invalid-disposition-unrecognized.json", "conflicting-disposition"],
 ];
 
 describe("de-0009-legacy-domain-transition.valid.json", () => {
@@ -109,5 +114,55 @@ describe("unsupported additional properties (recursive additionalProperties: fal
     expect(() =>
       assertValidAgainstSchema(schema, fixture, "de-0009-invalid-unsupported-nested-property.json"),
     ).toThrow(/unexpected_nested_field/);
+  });
+});
+
+describe("evidence-reference structure", () => {
+  it("requires observed_subject at the schema level", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-missing-subject.json");
+    expect(() =>
+      assertValidAgainstSchema(schema, fixture, "de-0009-invalid-evidence-missing-subject.json"),
+    ).toThrow(/observed_subject/);
+  });
+
+  it("rejects an observed_subject that does not name the entry's own origin", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-subject-mismatch.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-subject-mismatch:"))).toBe(true);
+  });
+
+  it("rejects a reference citation embedding URL credentials", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-url.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a reference citation embedding a secret keyword", async () => {
+    const fixture = await loadFixture("de-0009-invalid-evidence-reference-credential-keyword.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("evidence-reference-credential:"))).toBe(true);
+  });
+
+  it("rejects a blank recorded_by as missing attribution", async () => {
+    const fixture = await loadFixture("de-0009-invalid-missing-evidence-attribution.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("missing-evidence-attribution:"))).toBe(true);
+  });
+});
+
+describe("planned disposition enum", () => {
+  it("accepts every recognized disposition value in the valid fixture", async () => {
+    const fixture = await loadFixture("de-0009-legacy-domain-transition.valid.json");
+    const dispositions = fixture.legacy_domains.map((entry) => entry.transition_plan.disposition);
+    expect(new Set(dispositions)).toEqual(
+      new Set(["undecided", "retain_temporarily", "redirect_planned", "park_planned", "retire_planned"]),
+    );
+    expect(validateLegacyDomainTransition(fixture, registryFixture)).toEqual([]);
+  });
+
+  it("rejects a disposition value outside the recognized enum", async () => {
+    const fixture = await loadFixture("de-0009-invalid-disposition-unrecognized.json");
+    const errors = validateLegacyDomainTransition(fixture, registryFixture);
+    expect(errors.some((message) => message.startsWith("conflicting-disposition:"))).toBe(true);
   });
 });

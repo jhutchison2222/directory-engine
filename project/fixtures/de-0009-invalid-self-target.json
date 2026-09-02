@@ -8,8 +8,14 @@
       "source_geography": { "state": "colorado", "metro": "denver" },
       "current_evidence": {
         "evidence_type": "dns_lookup",
+        "observed_subject": "https://waterheaterrepairfinder.com",
         "observed_state": "active_resolving",
-        "captured_at": "2026-08-15T00:00:00Z"
+        "captured_at": "2026-08-15T00:00:00Z",
+        "reference": {
+          "reference_type": "internal_note",
+          "recorded_by": "governance-bot",
+          "citation": "Illustrative fixture evidence deliberately reusing a real DE-0008 origin as its own legacy origin to isolate the self-target violation."
+        }
       },
       "transition_plan": {
         "disposition": "redirect_planned",
