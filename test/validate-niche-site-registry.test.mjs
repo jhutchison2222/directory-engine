@@ -28,8 +28,12 @@ const INVALID_FIXTURES = [
   ["de-0008-invalid-origin-has-port.json", "origin-has-port"],
   ["de-0008-invalid-origin-has-wildcard.json", "origin-has-wildcard"],
   ["de-0008-invalid-metro-specific-origin.json", "metro-specific-origin"],
+  ["de-0008-invalid-metro-apex-origin.json", "metro-specific-origin"],
   ["de-0008-invalid-geography-embedded-niche.json", "geography-embedded-niche"],
+  ["de-0008-invalid-geography-embedded-niche-metro.json", "geography-embedded-niche"],
+  ["de-0008-invalid-geography-embedded-niche-united-states.json", "geography-embedded-niche"],
   ["de-0008-invalid-site-identity-geography-conflation.json", "site-identity-geography-conflation"],
+  ["de-0008-invalid-site-identity-geography-conflation-metro.json", "site-identity-geography-conflation"],
   ["de-0008-invalid-unsupported-ambiguity.json", "unsupported-ambiguity"],
 ];
 
@@ -74,5 +78,33 @@ describe("geography and niche/site identity independence", () => {
     for (const record of fixture.niche_sites) {
       expect(validateNicheSiteRegistry({ ...fixture, niche_sites: [record] })).toEqual([]);
     }
+  });
+
+  it("rejects a Denver-style apex domain even without a metro subdomain", async () => {
+    const fixture = await loadFixture("de-0008-invalid-metro-apex-origin.json");
+    const errors = validateNicheSiteRegistry(fixture);
+    expect(errors.some((message) => message.startsWith("metro-specific-origin:"))).toBe(true);
+  });
+
+  it("rejects a multi-token reserved geography phrase such as united-states", async () => {
+    const fixture = await loadFixture("de-0008-invalid-geography-embedded-niche-united-states.json");
+    const errors = validateNicheSiteRegistry(fixture);
+    expect(errors.some((message) => message.startsWith("geography-embedded-niche:"))).toBe(true);
+  });
+});
+
+describe("unsupported additional properties (recursive additionalProperties: false)", () => {
+  it("rejects an undeclared property at the document root", async () => {
+    const fixture = await loadFixture("de-0008-invalid-unsupported-root-property.json");
+    expect(() => assertValidAgainstSchema(schema, fixture, "de-0008-invalid-unsupported-root-property.json")).toThrow(
+      /unexpected_root_field/,
+    );
+  });
+
+  it("rejects an undeclared property inside a nested object", async () => {
+    const fixture = await loadFixture("de-0008-invalid-unsupported-nested-property.json");
+    expect(() =>
+      assertValidAgainstSchema(schema, fixture, "de-0008-invalid-unsupported-nested-property.json"),
+    ).toThrow(/unexpected_nested_field/);
   });
 });

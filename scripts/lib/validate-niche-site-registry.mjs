@@ -12,20 +12,43 @@ const US_STATE_SLUGS = new Set([
   "district-of-columbia",
 ]);
 
-const GEOGRAPHY_TOKENS = new Set(["metro", "us", "usa", "united-states"]);
+// A deliberately curated, non-exhaustive set of major US metro/city names.
+// ADR-001 names "Denver" itself as the canonical example of a metro term
+// that must not be embedded in niche, site, or origin identity, so this
+// list exists to make that example (and comparable major metros) fail
+// closed without an external lookup. Expanding coverage to every US city
+// is out of scope for this contract.
+const US_METRO_SLUGS = new Set([
+  "new-york", "los-angeles", "chicago", "houston", "phoenix", "philadelphia",
+  "san-antonio", "san-diego", "dallas", "austin", "san-jose", "fort-worth",
+  "jacksonville", "columbus", "charlotte", "indianapolis", "seattle", "denver",
+  "boston", "el-paso", "nashville", "detroit", "oklahoma-city", "portland",
+  "las-vegas", "memphis", "louisville", "baltimore", "milwaukee", "albuquerque",
+  "tucson", "fresno", "sacramento", "atlanta", "miami", "kansas-city",
+  "colorado-springs", "omaha", "raleigh", "long-beach", "virginia-beach",
+  "oakland", "minneapolis", "tulsa", "tampa", "arlington", "new-orleans",
+]);
+
+// Bare geography/metro keywords plus multi-token reserved phrases (for
+// example "united-states"). These are matched with the same sliding-window
+// token-sequence logic as state and metro names below, rather than an
+// exact-token Set lookup, so a multi-token phrase is detected even when it
+// appears as a run of separately hyphen-joined tokens inside a slug (for
+// example "united-states-plumbers").
+const GEOGRAPHY_TERMS = new Set([...US_STATE_SLUGS, ...US_METRO_SLUGS, "metro", "us", "usa", "united-states"]);
 
 /**
- * Detects a state name (as a contiguous run of hyphen-separated tokens) or a
- * bare geography/metro keyword inside a kebab-case identity slug, so niche
- * and site identity stay independent of geography per ADR-001.
+ * Detects a US state name, major metro/city name, or a bare geography/metro
+ * keyword (each as a contiguous run of hyphen-separated tokens) inside a
+ * kebab-case identity slug, so niche and site identity stay independent of
+ * geography per ADR-001.
  */
 function containsGeographyTerm(slug) {
   const tokens = slug.split("-");
-  if (tokens.some((token) => GEOGRAPHY_TOKENS.has(token))) return true;
-  for (const stateSlug of US_STATE_SLUGS) {
-    const stateTokens = stateSlug.split("-");
-    for (let start = 0; start <= tokens.length - stateTokens.length; start += 1) {
-      if (stateTokens.every((token, offset) => tokens[start + offset] === token)) {
+  for (const term of GEOGRAPHY_TERMS) {
+    const termTokens = term.split("-");
+    for (let start = 0; start <= tokens.length - termTokens.length; start += 1) {
+      if (termTokens.every((token, offset) => tokens[start + offset] === token)) {
         return true;
       }
     }
@@ -82,11 +105,19 @@ function validateOrigin(origin, siteId) {
     errors.push(`malformed-origin: site "${siteId}" origin "${origin}" host is not a valid domain`);
   } else {
     const labels = host.split(".");
-    const isBareOrWww = labels.length === 2 || (labels.length === 3 && labels[0] === "www");
+    const isWww = labels.length === 3 && labels[0] === "www";
+    const isBareOrWww = labels.length === 2 || isWww;
     if (!isBareOrWww) {
       errors.push(
         `metro-specific-origin: site "${siteId}" origin "${origin}" uses a subdomain, which implies a metro- or market-specific origin instead of one nationwide canonical origin per niche`,
       );
+    } else {
+      const registrableLabel = isWww ? labels[1] : labels[0];
+      if (containsGeographyTerm(registrableLabel)) {
+        errors.push(
+          `metro-specific-origin: site "${siteId}" origin "${origin}" domain label "${registrableLabel}" embeds a geography or metro term, which recreates the separate per-metro-domain pattern ADR-001 supersedes instead of one nationwide canonical origin per niche`,
+        );
+      }
     }
   }
 

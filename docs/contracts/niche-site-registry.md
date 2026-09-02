@@ -61,19 +61,31 @@ wildcard:
   `denver.example.com`) is a **metro-specific-origin** violation: a
   subdomain-per-market origin recreates the separate per-metro-domain
   pattern that ADR-001 explicitly supersedes, instead of the one nationwide
-  canonical origin per niche this registry requires.
+  canonical origin per niche this registry requires. An apex or `www` host
+  whose registrable domain label itself embeds a geography or metro term
+  (for example, `denver-plumbers.com`) is also a **metro-specific-origin**
+  violation, since ADR-001 supersedes the per-metro-domain pattern
+  regardless of whether the geography term appears as a subdomain or is
+  folded directly into the apex label.
 
 ## Geography and site/niche identity independence
 
 Per ADR-001, geography and service taxonomy remain independent dimensions.
-This registry extends that separation to site and niche identity:
+This registry extends that separation to site, niche, and origin identity.
+Geography and metro terms are detected as a contiguous run of
+hyphen-separated tokens within a kebab-case slug (so a multi-token reserved
+phrase such as `united-states` is caught even inside `united-states-plumbers`,
+not just as a single exact token), matched against every US state name, the
+District of Columbia, a deliberately curated (non-exhaustive) list of major
+US metro/city names such as `denver`, and the bare keywords `metro`, `us`,
+`usa`, and `united-states`:
 
-- A `niche_id` that embeds a US state name or a bare geography/metro keyword
-  (for example, `colorado-water-heater-repair`) is a
+- A `niche_id` that embeds one of these terms (for example,
+  `colorado-water-heater-repair` or `denver-plumbers`) is a
   **geography-embedded-niche** violation — the niche's identity is a service
   category, not a place.
-- A `site_id` that embeds a US state name or a bare geography/metro keyword
-  (for example, `water-heater-repair-colorado`) is a
+- A `site_id` that embeds one of these terms (for example,
+  `water-heater-repair-colorado` or `plumbers-denver`) is a
   **site-identity-geography-conflation** violation — the site's canonical
   identity must stay nationwide, not scoped to a place.
 
@@ -119,5 +131,13 @@ this schema.
 `project/fixtures/de-0008-niche-site-registry.valid.json` is a representative
 valid registry document. `project/fixtures/de-0008-invalid-*.json` each
 contain a deliberate violation, one file per fail-closed category listed
-above, plus `de-0008-invalid-country-not-us.json` for the internal country
-identity requirement.
+above (including additional fixtures isolating a Denver-style apex-domain
+origin, a Denver-style `niche_id`/`site_id`, and the multi-token
+`united-states` phrase within the `metro-specific-origin`,
+`geography-embedded-niche`, and `site-identity-geography-conflation`
+categories), plus `de-0008-invalid-country-not-us.json` for the internal
+country identity requirement and
+`de-0008-invalid-unsupported-root-property.json` /
+`de-0008-invalid-unsupported-nested-property.json` proving the recursive
+`additionalProperties: false` schema constraint rejects an undeclared field
+at the document root and inside a nested object, respectively.
