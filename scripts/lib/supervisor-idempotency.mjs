@@ -30,6 +30,71 @@ export function buildIdempotencyKey({ subjectType, subjectNumber, stateId, reaso
 }
 
 /**
+ * Inverse of buildIdempotencyKey. Returns null for anything that does not
+ * round-trip to a well-formed key, so a malformed or forged-looking key can
+ * never be attributed a subjectType/subjectNumber/stateId/reason by
+ * accident. Used to aggregate dispatch history across equivalent
+ * remediation reasons for the same exact subject/state (the retry-attempt
+ * cap counts "remediation cycles", not "times this exact wording was sent").
+ */
+export function parseIdempotencyKey(key) {
+  if (typeof key !== "string") return null;
+  const parts = key.split(":");
+  if (parts.length !== 4) return null;
+  const [subjectType, subjectNumberRaw, stateId, reason] = parts;
+  const subjectNumber = Number(subjectNumberRaw);
+  if (!SUBJECT_TYPES.has(subjectType)) return null;
+  if (!Number.isInteger(subjectNumber) || subjectNumber <= 0) return null;
+  if (!STATE_ID_PATTERN.test(stateId)) return null;
+  if (!REASON_PATTERN.test(reason)) return null;
+  return { subjectType, subjectNumber, stateId, reason };
+}
+
+/** The exact GitHub identity the supervisor itself posts dispatch markers
+ * as. Injectable so tests never hardcode a magic string inline and so a
+ * differently-configured deployment could override it explicitly. */
+export const DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN = "github-actions[bot]";
+export const DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE = "Bot";
+
+/**
+ * DE-0010 cycle 2/3: a prior version parsed a dispatch marker out of *any*
+ * issue/PR comment with no author check at all. Because the marker format
+ * (subject type, number, head SHA, reason string) is entirely public, any
+ * commenter could forge one with a future `dispatchedAt` and silence the
+ * supervisor for that subject indefinitely. Only a comment authored by the
+ * exact trusted marker-author identity (by default the supervisor's own
+ * `github-actions[bot]` identity, of type `Bot`) is ever trusted as
+ * dispatch-ledger evidence.
+ */
+export function isTrustedDispatchMarkerAuthor(
+  author,
+  { login = DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type = DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE } = {},
+) {
+  return (
+    typeof author?.login === "string" &&
+    author.login === login &&
+    typeof author?.type === "string" &&
+    author.type === type
+  );
+}
+
+/**
+ * Parses only the trusted-author subset of a comment list into dispatch
+ * markers, silently discarding any comment from an untrusted author -
+ * including one whose body would otherwise parse as a well-formed marker.
+ * `comments` is `{ body, author: { login, type } }[]`.
+ */
+export function filterTrustedDispatchMarkers(comments, trustedAuthor = {}) {
+  const markers = [];
+  for (const comment of comments ?? []) {
+    if (!isTrustedDispatchMarkerAuthor(comment?.author, trustedAuthor)) continue;
+    const marker = parseDispatchMarker(comment?.body);
+    if (marker !== null) markers.push(marker);
+  }
+  return markers;
+}
+
+/**
  * Renders the hidden HTML-comment bookkeeping marker posted to the subject's
  * comment thread after a successful dispatch. The marker never carries the
  * Workspace Agent token or any other credential material - only the

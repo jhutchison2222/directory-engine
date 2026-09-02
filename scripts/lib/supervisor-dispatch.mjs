@@ -6,7 +6,7 @@
  * recorded after the fact), an optional `OpenAI-Beta` header for run proof,
  * and success is exactly HTTP 202 Accepted.
  */
-const AGENT_ID_PATTERN = /^agtch_[A-Za-z0-9]{6,64}$/;
+const AGENT_ID_PATTERN = /^agtch_[A-Za-z0-9_-]{6,64}$/;
 
 /**
  * Fixed, code-reviewed API base for the ChatGPT Workspace Agents trigger
@@ -44,10 +44,56 @@ export function buildTriggerUrl(agentId) {
   return `${WORKSPACE_AGENT_API_BASE}/workspace_agents/${validateAgentId(agentId)}/trigger`;
 }
 
-export function buildDispatchPayload({ idempotencyKey, reason, subject }) {
+/** Bounded, human-readable next action per dispatch reason. Deliberately a
+ * fixed lookup, never interpolated from issue/PR content, so the instruction
+ * sent to the Workspace Agent can never be steered by untrusted repository
+ * text. */
+const NEXT_ACTION_BY_REASON = Object.freeze({
+  ci_failed: "Investigate the failing checks at this exact head and request remediation once they pass.",
+  review_missing:
+    "Perform an independent exact-head review and record an explicit owner-authored acceptance or rejection tied to this exact head.",
+  review_rejected: "Confirm the requested remediation status, then re-review once a new exact head is pushed.",
+  merge_ready:
+    "Re-read fresh evidence at this exact head; if it still holds, merge under the owner's standing code-only authorization with expected-head protection and a merge commit.",
+  queued_task_start: "Begin the queued task under the current authorization boundary and report back with the resulting pull request.",
+});
+
+/**
+ * Builds a bounded, actionable, non-secret instruction for the Workspace
+ * Agent: repository identity, the exact subject, the exact head SHA where
+ * one applies, the dispatch reason, an explicit fresh-evidence requirement
+ * (the Workspace Agent must re-read current state rather than trust any
+ * cached evidence), the current authorization boundary, and the requested
+ * next action. This function accepts no credential parameter at all, so it
+ * is structurally impossible for a secret to end up in the instruction text.
+ */
+export function buildDispatchInstruction({ repositoryFullName, subjectType, number, headSha, reason }) {
+  if (typeof repositoryFullName !== "string" || repositoryFullName.trim().length === 0) {
+    throw new Error("buildDispatchInstruction: repositoryFullName is required");
+  }
+  const lines = [`Repository: ${repositoryFullName}`, `Subject: ${subjectType} #${number}`];
+  if (typeof headSha === "string" && headSha.length > 0) {
+    lines.push(`Exact head: ${headSha}`);
+  }
+  lines.push(
+    `Reason: ${reason}`,
+    "Fresh-evidence requirement: re-read the current exact-head state before acting; do not rely on cached or prior-head evidence.",
+    "Authorization boundary: code-only review and guarded merge coordination under the owner's standing authorization; no deployment, credential, secret, settings, or production/live-system action is authorized.",
+    `Requested next action: ${NEXT_ACTION_BY_REASON[reason] ?? "Re-read fresh evidence before taking any action."}`,
+  );
+  return lines.join("\n");
+}
+
+export function buildDispatchPayload({ idempotencyKey, reason, subject, repositoryFullName }) {
   return {
     conversation_key: idempotencyKey,
-    input: JSON.stringify({ reason, subject }),
+    input: buildDispatchInstruction({
+      repositoryFullName,
+      subjectType: subject.type,
+      number: subject.number,
+      headSha: subject.headSha ?? null,
+      reason,
+    }),
   };
 }
 
@@ -67,10 +113,18 @@ export function buildDispatchPayload({ idempotencyKey, reason, subject }) {
  * dispatch marker is recorded. Success is exactly HTTP 202 Accepted; any
  * other non-redirect status is reported as a failed (but not thrown) result.
  */
-export async function dispatchToWorkspaceAgent({ agentId, token, idempotencyKey, reason, subject, fetchImpl }) {
+export async function dispatchToWorkspaceAgent({
+  agentId,
+  token,
+  idempotencyKey,
+  reason,
+  subject,
+  repositoryFullName,
+  fetchImpl,
+}) {
   const url = buildTriggerUrl(agentId);
   const authorization = `Bearer ${requireWorkspaceAgentToken(token)}`;
-  const payload = buildDispatchPayload({ idempotencyKey, reason, subject });
+  const payload = buildDispatchPayload({ idempotencyKey, reason, subject, repositoryFullName });
 
   const response = await fetchImpl(url, {
     method: "POST",

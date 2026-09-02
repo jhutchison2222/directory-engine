@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { buildIdempotencyKey } from "./supervisor-idempotency.mjs";
+import { buildIdempotencyKey, parseIdempotencyKey } from "./supervisor-idempotency.mjs";
+import { OWNER_VERDICT_KINDS, selectLatestOwnerVerdict } from "./supervisor-verdicts.mjs";
 
 /** Issue label that opts a queued task into autonomous supervision. Pull
  * requests are supervised whenever they are non-draft; issues additionally
@@ -8,10 +9,11 @@ import { buildIdempotencyKey } from "./supervisor-idempotency.mjs";
 export const AUTONOMY_READY_LABEL = "autonomy-ready";
 
 /** Label the supervisor applies itself (never a human) once a subject has
- * exhausted MAX_DISPATCH_ATTEMPTS_PER_KEY for its current exact-state/reason
- * key. It is included in HOLD_LABELS so that, from the next cycle onward, the
- * blocked subject is held exactly like a human-applied hold - no special
- * casing is needed once the label is visible on the subject. */
+ * exhausted its remediation-cycle attempt budget at its current exact head
+ * (or, for issues, exact content). It is included in HOLD_LABELS so that,
+ * from the next cycle onward, the blocked subject is held exactly like a
+ * human-applied hold - no special casing is needed once the label is
+ * visible on the subject. */
 export const AUTONOMY_BLOCKED_LABEL = "autonomy-blocked";
 
 /** Labels that place a subject on hold: the supervisor evaluates but never
@@ -28,12 +30,16 @@ export const HOLD_LABELS = new Set(["security-review", "major-decision", AUTONOM
  * has not resolved a persistent condition. */
 export const RETRY_INTERVAL_MS = 30 * 60 * 1000;
 
-/** Maximum number of dispatch requests the supervisor will ever send for one
- * exact-state/reason idempotency key. Once this many dispatches have already
- * gone out for the same key, the next evaluation blocks instead of retrying
- * again, applying AUTONOMY_BLOCKED_LABEL so a human decision is required to
- * move the subject forward. A new head SHA (or, for issues, new content)
- * produces a new key and a fresh attempt budget. */
+/** Maximum number of remediation/re-review dispatch cycles the supervisor
+ * will ever send for one exact head (or, for issues, exact content) across
+ * every equivalent failure reason combined - not three separately per
+ * reason wording. A subject that bounces between, say, ci_failed and
+ * review_rejected at the same head still exhausts this budget after three
+ * dispatches total. A new head SHA (or, for issues, new content) produces a
+ * new state and a fresh attempt budget. `merge_ready` dispatch is
+ * intentionally excluded from this cap: it is governed independently by its
+ * own idempotency key and RETRY_INTERVAL_MS only (see REMEDIATION_REASONS).
+ */
 export const MAX_DISPATCH_ATTEMPTS_PER_KEY = 3;
 
 export const AUTONOMY_BLOCKED_REASON = "autonomy_blocked";
@@ -46,45 +52,12 @@ export const REASONS = Object.freeze({
   QUEUED_TASK_START: "queued_task_start",
 });
 
-/** Explicit allowlist of trusted independent-reviewer GitHub logins whose
- * verdict can satisfy exact-head acceptance: the dedicated Codex reviewer and
- * the dedicated ChatGPT Workspace Agent. Generic third-party approvals and
- * `github-actions[bot]` never count merely for lacking "claude" in the login;
- * they must also be one of these two named, owner-authorized identities.
- *
- * Open item: this work packet's available tool access could not
- * independently confirm the literal GitHub login(s) issue #25's Codex and
- * Workspace Agent reviewer identities use. Until Codex/owner review confirms
- * and, if needed, corrects these literal values, this allowlist fails closed
- * (nothing outside it satisfies acceptance) rather than guessing a broader
- * set. See docs/automation/autonomy-supervisor.md.
- */
-export const TRUSTED_INDEPENDENT_REVIEWER_LOGINS = Object.freeze([
-  "codex",
-  "chatgpt-codex-connector",
-  "directory-engine-workspace-agent",
-]);
-
-/** Claude must never satisfy independent exact-head review, and neither may
- * any other generic reviewer: only a login on the explicit trusted allowlist
- * above counts as independent-acceptance evidence. */
-export function isIndependentReviewerLogin(login) {
-  if (typeof login !== "string" || login.length === 0) return false;
-  const normalized = login.toLowerCase();
-  if (normalized.includes("claude")) return false;
-  return TRUSTED_INDEPENDENT_REVIEWER_LOGINS.includes(normalized);
-}
-
-/** Check-run names that are never treated as CI evidence: the supervisor's
- * own check and Claude's review check would otherwise create a circular or
- * non-CI signal (e.g. the supervisor waiting on a check that can never
- * complete while it is itself running, or treating an implementer's own
- * review check as an independent CI gate). */
-const NON_CI_CHECK_NAME_PATTERN = /^(claude|autonomy supervisor)\b/i;
-
-export function isCiRelevantCheckName(name) {
-  return typeof name === "string" && name.trim().length > 0 && !NON_CI_CHECK_NAME_PATTERN.test(name.trim());
-}
+/** Reasons that count against the shared remediation-cycle attempt budget
+ * (MAX_DISPATCH_ATTEMPTS_PER_KEY), regardless of which of these specific
+ * reasons produced each dispatch. `merge_ready` is deliberately not a
+ * member: a merge-ready subject is governed by its own idempotency key and
+ * retry interval only, never blocked by this cap. */
+const REMEDIATION_REASONS = new Set([REASONS.CI_FAILED, REASONS.REVIEW_MISSING, REASONS.REVIEW_REJECTED]);
 
 export function findActiveHoldLabel(labels) {
   for (const label of labels ?? []) {
@@ -102,6 +75,27 @@ function mostRecentDispatchAt(dispatches, key) {
     if (latest === null || at > latest) latest = at;
   }
   return latest;
+}
+
+/**
+ * Counts prior dispatches for the same exact subject/state whose reason is
+ * one of REMEDIATION_REASONS, regardless of which specific reason each one
+ * carried. This is what makes the retry-attempt cap span "equivalent
+ * failure reasons" instead of resetting every time the reason wording
+ * changes between cycles.
+ */
+function countRemediationDispatchesAtState(dispatches, subjectType, subjectNumber, stateId) {
+  let count = 0;
+  for (const dispatch of dispatches ?? []) {
+    const parsed = parseIdempotencyKey(dispatch.key);
+    if (!parsed) continue;
+    if (parsed.subjectType !== subjectType) continue;
+    if (parsed.subjectNumber !== subjectNumber) continue;
+    if (parsed.stateId !== stateId) continue;
+    if (!REMEDIATION_REASONS.has(parsed.reason)) continue;
+    count += 1;
+  }
+  return count;
 }
 
 function countDispatchesForKey(dispatches, key) {
@@ -129,35 +123,20 @@ export function computeIssueStateFingerprint(issue) {
 }
 
 /**
- * Selects the chronologically latest independent review verdict recorded
- * against one exact head SHA. This is what prevents the PR #24 stale-verdict
- * race: if an earlier acceptance and a later rejection/dismissal both exist
- * for the same exact head, the later one is authoritative and is the only one
- * returned - an earlier "approved" event at that head is never reachable once
- * a later event at the same head exists. Events are supplied unsorted;
- * `submittedAt` is parsed to establish chronology.
- */
-export function selectLatestReviewEvent(reviewEvents, headSha) {
-  const atHead = (reviewEvents ?? []).filter((event) => event.headSha === headSha);
-  if (atHead.length === 0) return null;
-  const sorted = [...atHead].sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
-  return sorted[sorted.length - 1];
-}
-
-/**
  * Decides the supervisor's action for one non-draft-or-draft pull request.
- * Only checks and reviews recorded against the pull request's exact current
- * head SHA are trusted as evidence; anything recorded against an older head
- * is stale and is treated as absent, forcing a fresh evaluation.
+ * Only checks and owner verdicts recorded against the pull request's exact
+ * current head SHA are trusted as evidence; anything recorded against an
+ * older head is stale and is treated as absent, forcing a fresh evaluation.
  *
  * `pr.checks` is `{ headSha, conclusion: "success" | "failure" | "pending" }
- *   | null` and must already have non-CI-relevant check names filtered out by
- * the caller (see isCiRelevantCheckName). `pr.reviewEvents` is an array of
- * `{ headSha, state: "approved" | "changes_requested" | "dismissed" |
- * "pending", submittedAt }` and must already have non-independent (Claude, or
- * any login outside TRUSTED_INDEPENDENT_REVIEWER_LOGINS) reviews filtered out
- * by the caller; the chronologically latest event at the exact current head
- * is authoritative (see selectLatestReviewEvent).
+ *   | null` and must already be scoped to the named governance CI check by
+ * the caller (see summarizeGovernanceCheckRuns in supervisor-ci.mjs).
+ * `pr.ownerVerdictEvents` is an array of owner-authored verdict events (see
+ * buildOwnerVerdictEvents in supervisor-verdicts.mjs) and must already have
+ * every non-owner-authored comment/review filtered out by the caller; the
+ * chronologically latest event at the exact current head is authoritative
+ * (see selectLatestOwnerVerdict - this is what prevents the PR #24
+ * stale-verdict race).
  */
 export function evaluatePullRequestAction(pr, now, dispatches = []) {
   if (pr.isDraft) {
@@ -170,25 +149,25 @@ export function evaluatePullRequestAction(pr, now, dispatches = []) {
   }
 
   const checksAtHead = pr.checks && pr.checks.headSha === pr.headSha ? pr.checks : null;
-  const reviewAtHead = selectLatestReviewEvent(pr.reviewEvents, pr.headSha);
 
-  let reason = null;
-  if (checksAtHead?.conclusion === "failure") {
-    reason = REASONS.CI_FAILED;
-  } else if (checksAtHead?.conclusion === "success") {
-    if (!reviewAtHead) {
-      reason = REASONS.REVIEW_MISSING;
-    } else if (reviewAtHead.state === "changes_requested" || reviewAtHead.state === "dismissed") {
-      reason = REASONS.REVIEW_REJECTED;
-    } else if (reviewAtHead.state === "approved") {
-      reason = REASONS.MERGE_READY;
-    } else {
-      return { action: "skip", reason: "awaiting_review" };
-    }
+  if (!checksAtHead || checksAtHead.conclusion === "pending") {
+    return { action: "skip", reason: "awaiting_ci" };
   }
 
-  if (!reason) {
-    return { action: "skip", reason: checksAtHead ? "awaiting_review" : "awaiting_ci" };
+  let reason;
+  if (checksAtHead.conclusion === "failure") {
+    reason = REASONS.CI_FAILED;
+  } else {
+    const ownerVerdict = selectLatestOwnerVerdict(pr.ownerVerdictEvents, pr.headSha);
+    if (!ownerVerdict) {
+      reason = REASONS.REVIEW_MISSING;
+    } else if (ownerVerdict.kind === OWNER_VERDICT_KINDS.ACCEPTED) {
+      reason = REASONS.MERGE_READY;
+    } else {
+      // REJECTED, SUPERSEDED, or REMEDIATION_REQUESTED all block merge-ready
+      // dispatch and instead ask for remediation/re-review.
+      reason = REASONS.REVIEW_REJECTED;
+    }
   }
 
   const idempotencyKey = buildIdempotencyKey({
@@ -198,7 +177,11 @@ export function evaluatePullRequestAction(pr, now, dispatches = []) {
     reason,
   });
 
-  if (countDispatchesForKey(dispatches, idempotencyKey) >= MAX_DISPATCH_ATTEMPTS_PER_KEY) {
+  if (
+    REMEDIATION_REASONS.has(reason) &&
+    countRemediationDispatchesAtState(dispatches, "pull_request", pr.number, pr.headSha) >=
+      MAX_DISPATCH_ATTEMPTS_PER_KEY
+  ) {
     return { action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey };
   }
 

@@ -36,6 +36,7 @@ const SELF_OR_RECURSIVE_ACTOR_PATTERN = /claude|autonomy-supervisor/i;
 
 export function shouldHandleEvent({
   eventName,
+  payloadAvailable = true,
   action,
   repositoryFullName,
   expectedRepositoryFullName,
@@ -47,6 +48,13 @@ export function shouldHandleEvent({
 } = {}) {
   if (eventName === "schedule" || eventName === "workflow_dispatch") {
     return { handle: true, reason: eventName };
+  }
+
+  // A missing or unreadable event payload for any guarded event-driven
+  // invocation must fail closed rather than fall back to an unguarded scan;
+  // only the schedule/manual paths above may proceed without one.
+  if (!payloadAvailable) {
+    return { handle: false, reason: "missing_or_unreadable_event_payload" };
   }
 
   if (typeof expectedRepositoryFullName === "string" && repositoryFullName !== expectedRepositoryFullName) {

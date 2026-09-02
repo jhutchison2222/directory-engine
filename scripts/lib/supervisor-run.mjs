@@ -10,7 +10,7 @@ import { formatDispatchMarker } from "./supervisor-idempotency.mjs";
  * failure for one subject cannot be conflated with the decision logic
  * itself.
  */
-async function applyDecision({ subjectType, number, decision, now, deps }) {
+async function applyDecision({ subjectType, number, headSha, decision, now, deps }) {
   if (decision.action === "blocked") {
     await deps.addLabel(subjectType, number, AUTONOMY_BLOCKED_LABEL);
     return { status: "blocked", reason: decision.reason, idempotencyKey: decision.idempotencyKey };
@@ -23,7 +23,7 @@ async function applyDecision({ subjectType, number, decision, now, deps }) {
   const dispatchResult = await deps.dispatchToWorkspaceAgent({
     idempotencyKey: decision.idempotencyKey,
     reason: decision.reason,
-    subject: { type: subjectType, number },
+    subject: { type: subjectType, number, headSha: headSha ?? null },
   });
 
   if (!dispatchResult.ok) {
@@ -43,15 +43,19 @@ async function applyDecision({ subjectType, number, decision, now, deps }) {
  *
  * - `now`: a Date, the single evaluation instant for this cycle.
  * - `listPullRequests()`: resolves non-draft-or-draft PR snapshots
- *   `{ number, headSha, isDraft, labels, checks, reviewEvents }` (reviewEvents
- *   already filtered to trusted independent reviewers by the caller, and
- *   already excludes non-CI-relevant check names from `checks`).
+ *   `{ number, headSha, isDraft, labels, checks, ownerVerdictEvents }`
+ *   (`ownerVerdictEvents` already filtered to the trusted repository owner
+ *   login by the caller, and `checks` already scoped to the named
+ *   governance CI check).
  * - `listIssues()`: resolves open issue snapshots `{ number, labels, title,
  *   body }`.
  * - `listDispatchMarkers(subjectType, number)`: resolves prior
- *   `{ key, dispatchedAt }` dispatch records for one subject.
+ *   `{ key, dispatchedAt }` dispatch records for one subject, already
+ *   restricted to the trusted marker-author identity by the caller.
  * - `dispatchToWorkspaceAgent({ idempotencyKey, reason, subject })`: resolves
- *   `{ ok, status }`.
+ *   `{ ok, status }`. The caller's implementation is responsible for
+ *   supplying repository identity to the underlying request; this
+ *   orchestrator only ever supplies `subject.headSha` when one applies.
  * - `postDispatchMarker(subjectType, number, markerBody)`: records a
  *   dispatch marker.
  * - `addLabel(subjectType, number, label)`: applies a label to the subject;
@@ -75,7 +79,14 @@ export async function runAutonomySupervisor(deps) {
     try {
       const dispatches = await listDispatchMarkers("pull_request", pr.number);
       const decision = evaluatePullRequestAction(pr, now, dispatches);
-      const outcome = await applyDecision({ subjectType: "pull_request", number: pr.number, decision, now, deps });
+      const outcome = await applyDecision({
+        subjectType: "pull_request",
+        number: pr.number,
+        headSha: pr.headSha,
+        decision,
+        now,
+        deps,
+      });
       results.push({ subjectType: "pull_request", number: pr.number, ...outcome });
     } catch (error) {
       results.push({ subjectType: "pull_request", number: pr.number, status: "error", message: error.message });

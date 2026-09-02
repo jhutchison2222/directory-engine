@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   WORKSPACE_AGENT_API_BASE,
+  buildDispatchInstruction,
   buildDispatchPayload,
   buildTriggerUrl,
   dispatchToWorkspaceAgent,
@@ -11,18 +12,34 @@ import {
 // Obviously-fake fixture value, never a real credential.
 const FIXTURE_TOKEN = "fixture-not-a-real-token";
 const AGENT_ID = "agtch_directoryengineworkspace01";
+const REPO = "jhutchison2222/directory-engine";
+const HEAD_A = "a".repeat(40);
 
 describe("validateAgentId", () => {
   it("accepts a well-formed agtch_ channel id", () => {
     expect(validateAgentId(AGENT_ID)).toBe(AGENT_ID);
   });
 
-  it.each([undefined, null, "", "  ", "agtch_", "x", "has a space", "semi;colon", "directory-engine-workspace-agent"])(
-    "fails closed for invalid agent id %j",
-    (value) => {
-      expect(() => validateAgentId(value)).toThrow(/CHATGPT_WORKSPACE_AGENT_ID/);
-    },
-  );
+  it("accepts the official example shape containing underscores", () => {
+    expect(validateAgentId("agtch_abc123_def-456")).toBe("agtch_abc123_def-456");
+  });
+
+  it.each([
+    undefined,
+    null,
+    "",
+    "  ",
+    "agtch_",
+    "x",
+    "has a space",
+    "semi;colon",
+    "directory-engine-workspace-agent",
+    "agtch_has space",
+    "agtch_https://evil.example/x",
+    "agtch_" + "a".repeat(65),
+  ])("fails closed for invalid agent id %j", (value) => {
+    expect(() => validateAgentId(value)).toThrow(/CHATGPT_WORKSPACE_AGENT_ID/);
+  });
 });
 
 describe("requireWorkspaceAgentToken", () => {
@@ -46,17 +63,72 @@ describe("buildTriggerUrl", () => {
   });
 });
 
+describe("buildDispatchInstruction", () => {
+  it("includes repository identity, subject, exact head, reason, freshness requirement, authorization boundary, and next action", () => {
+    const instruction = buildDispatchInstruction({
+      repositoryFullName: REPO,
+      subjectType: "pull_request",
+      number: 26,
+      headSha: HEAD_A,
+      reason: "ci_failed",
+    });
+    expect(instruction).toContain(`Repository: ${REPO}`);
+    expect(instruction).toContain("Subject: pull_request #26");
+    expect(instruction).toContain(`Exact head: ${HEAD_A}`);
+    expect(instruction).toContain("Reason: ci_failed");
+    expect(instruction.toLowerCase()).toContain("fresh-evidence requirement");
+    expect(instruction.toLowerCase()).toContain("authorization boundary");
+    expect(instruction).toContain("Requested next action:");
+  });
+
+  it("omits the exact-head line for a subject with no head SHA (a queued issue)", () => {
+    const instruction = buildDispatchInstruction({
+      repositoryFullName: REPO,
+      subjectType: "issue",
+      number: 25,
+      headSha: null,
+      reason: "queued_task_start",
+    });
+    expect(instruction).not.toContain("Exact head:");
+  });
+
+  it("fails closed without a repository identity", () => {
+    expect(() =>
+      buildDispatchInstruction({ repositoryFullName: "", subjectType: "issue", number: 25, reason: "queued_task_start" }),
+    ).toThrow(/repositoryFullName/);
+  });
+
+  it("never accepts or embeds a credential parameter (no such parameter exists)", () => {
+    const instruction = buildDispatchInstruction({
+      repositoryFullName: REPO,
+      subjectType: "pull_request",
+      number: 26,
+      headSha: HEAD_A,
+      reason: "merge_ready",
+    });
+    expect(instruction.toLowerCase()).not.toContain("token");
+    expect(instruction.toLowerCase()).not.toContain("bearer");
+  });
+});
+
 describe("buildDispatchPayload", () => {
-  it("builds the official conversation_key/input body carrying only non-secret fields", () => {
+  it("builds the official conversation_key/input body carrying only non-secret, bounded instruction text", () => {
     const payload = buildDispatchPayload({
       idempotencyKey: "pull_request:26:abc:ci_failed",
       reason: "ci_failed",
-      subject: { type: "pull_request", number: 26 },
+      subject: { type: "pull_request", number: 26, headSha: HEAD_A },
+      repositoryFullName: REPO,
     });
-    expect(payload).toEqual({
-      conversation_key: "pull_request:26:abc:ci_failed",
-      input: JSON.stringify({ reason: "ci_failed", subject: { type: "pull_request", number: 26 } }),
-    });
+    expect(payload.conversation_key).toBe("pull_request:26:abc:ci_failed");
+    expect(payload.input).toBe(
+      buildDispatchInstruction({
+        repositoryFullName: REPO,
+        subjectType: "pull_request",
+        number: 26,
+        headSha: HEAD_A,
+        reason: "ci_failed",
+      }),
+    );
   });
 });
 
@@ -66,7 +138,8 @@ describe("dispatchToWorkspaceAgent", () => {
     token: FIXTURE_TOKEN,
     idempotencyKey: "pull_request:26:abc:ci_failed",
     reason: "ci_failed",
-    subject: { type: "pull_request", number: 26 },
+    subject: { type: "pull_request", number: 26, headSha: HEAD_A },
+    repositoryFullName: REPO,
   };
 
   it("posts to the fixed trigger endpoint with the Idempotency-Key header and the token only in Authorization", async () => {
@@ -84,10 +157,12 @@ describe("dispatchToWorkspaceAgent", () => {
     expect(init.headers["openai-beta"]).toBe("workspace_agent_runs=v1");
     expect(JSON.stringify(init)).not.toContain(FIXTURE_TOKEN.slice(0, 4) + FIXTURE_TOKEN.slice(4).toUpperCase());
     expect(JSON.parse(init.body)).not.toHaveProperty("token");
-    expect(JSON.parse(init.body)).toEqual({
-      conversation_key: baseArgs.idempotencyKey,
-      input: JSON.stringify({ reason: baseArgs.reason, subject: baseArgs.subject }),
-    });
+    expect(init.body).not.toContain(FIXTURE_TOKEN);
+    const parsedBody = JSON.parse(init.body);
+    expect(parsedBody.conversation_key).toBe(baseArgs.idempotencyKey);
+    expect(parsedBody.input).toContain(`Repository: ${REPO}`);
+    expect(parsedBody.input).toContain("Subject: pull_request #26");
+    expect(parsedBody.input).toContain(`Exact head: ${HEAD_A}`);
   });
 
   it("treats exactly HTTP 202 as success and any other status (even 200 OK) as not-ok", async () => {
@@ -121,5 +196,12 @@ describe("dispatchToWorkspaceAgent", () => {
       /CHATGPT_WORKSPACE_AGENT_ID/,
     );
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("two concurrent evaluations of identical, unchanged state send the same Idempotency-Key header", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ status: 202 });
+    await dispatchToWorkspaceAgent({ ...baseArgs, fetchImpl });
+    await dispatchToWorkspaceAgent({ ...baseArgs, fetchImpl });
+    expect(fetchImpl.mock.calls[0][1].headers["idempotency-key"]).toBe(fetchImpl.mock.calls[1][1].headers["idempotency-key"]);
   });
 });

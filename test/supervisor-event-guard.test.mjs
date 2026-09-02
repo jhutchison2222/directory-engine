@@ -17,6 +17,54 @@ describe("shouldHandleEvent: schedule and manual dispatch always proceed", () =>
   });
 });
 
+describe("shouldHandleEvent: missing/unreadable event payload fails closed for event-driven invocations", () => {
+  it("never proceeds for a guarded event type when the payload is unavailable", () => {
+    const decision = shouldHandleEvent({
+      eventName: "pull_request",
+      payloadAvailable: false,
+      action: "opened",
+      repositoryFullName: REPO,
+      expectedRepositoryFullName: REPO,
+      senderLogin: "a-human",
+      senderType: "User",
+    });
+    expect(decision).toEqual({ handle: false, reason: "missing_or_unreadable_event_payload" });
+  });
+
+  it.each(["pull_request", "pull_request_review", "issue_comment", "workflow_run"])(
+    "fails closed for %s when the payload is unavailable, regardless of any other field",
+    (eventName) => {
+      expect(shouldHandleEvent({ eventName, payloadAvailable: false })).toEqual({
+        handle: false,
+        reason: "missing_or_unreadable_event_payload",
+      });
+    },
+  );
+
+  it("does not require a payload for the scheduled recovery backstop or manual dispatch", () => {
+    expect(shouldHandleEvent({ eventName: "schedule", payloadAvailable: false })).toEqual({
+      handle: true,
+      reason: "schedule",
+    });
+    expect(shouldHandleEvent({ eventName: "workflow_dispatch", payloadAvailable: false })).toEqual({
+      handle: true,
+      reason: "workflow_dispatch",
+    });
+  });
+
+  it("proceeds normally once a payload is available (default assumption when the caller omits the flag)", () => {
+    const decision = shouldHandleEvent({
+      eventName: "pull_request",
+      action: "opened",
+      repositoryFullName: REPO,
+      expectedRepositoryFullName: REPO,
+      senderLogin: "a-human",
+      senderType: "User",
+    });
+    expect(decision).toEqual({ handle: true, reason: "pull_request_event" });
+  });
+});
+
 describe("shouldHandleEvent: repository guard", () => {
   it("ignores an event from a different repository", () => {
     const decision = shouldHandleEvent({

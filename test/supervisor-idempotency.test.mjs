@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN,
+  DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE,
   buildIdempotencyKey,
+  filterTrustedDispatchMarkers,
   formatDispatchMarker,
+  isTrustedDispatchMarkerAuthor,
   parseDispatchMarker,
+  parseIdempotencyKey,
 } from "../scripts/lib/supervisor-idempotency.mjs";
 
 describe("buildIdempotencyKey", () => {
@@ -40,6 +45,73 @@ describe("buildIdempotencyKey", () => {
     [{ subjectType: "issue", subjectNumber: 1, stateId: "a".repeat(40), reason: "CI Failed" }, /reason/],
   ])("fails closed on invalid input %#", (input, expectedMessage) => {
     expect(() => buildIdempotencyKey(input)).toThrow(expectedMessage);
+  });
+});
+
+describe("parseIdempotencyKey", () => {
+  it("is the exact inverse of buildIdempotencyKey", () => {
+    const input = { subjectType: "pull_request", subjectNumber: 26, stateId: "a".repeat(40), reason: "ci_failed" };
+    expect(parseIdempotencyKey(buildIdempotencyKey(input))).toEqual(input);
+  });
+
+  it("returns null for a malformed or forged-looking key", () => {
+    expect(parseIdempotencyKey("not-a-key")).toBeNull();
+    expect(parseIdempotencyKey("pull_request:26:not-hex:ci_failed")).toBeNull();
+    expect(parseIdempotencyKey("workflow_run:26:" + "a".repeat(40) + ":ci_failed")).toBeNull();
+    expect(parseIdempotencyKey("pull_request:0:" + "a".repeat(40) + ":ci_failed")).toBeNull();
+    expect(parseIdempotencyKey("pull_request:26:" + "a".repeat(40) + ":CI Failed")).toBeNull();
+    expect(parseIdempotencyKey(undefined)).toBeNull();
+  });
+});
+
+describe("isTrustedDispatchMarkerAuthor", () => {
+  it("trusts exactly the default supervisor bot identity", () => {
+    expect(isTrustedDispatchMarkerAuthor({ login: DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type: DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE })).toBe(
+      true,
+    );
+  });
+
+  it("rejects an attacker-controlled author impersonating the login but not the type, or vice versa", () => {
+    expect(isTrustedDispatchMarkerAuthor({ login: DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type: "User" })).toBe(false);
+    expect(isTrustedDispatchMarkerAuthor({ login: "some-attacker", type: DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE })).toBe(false);
+  });
+
+  it("supports an injected trusted identity override for tests/alternate deployments", () => {
+    expect(isTrustedDispatchMarkerAuthor({ login: "custom-bot", type: "Bot" }, { login: "custom-bot", type: "Bot" })).toBe(
+      true,
+    );
+  });
+
+  it("fails closed on a missing author", () => {
+    expect(isTrustedDispatchMarkerAuthor(undefined)).toBe(false);
+    expect(isTrustedDispatchMarkerAuthor({})).toBe(false);
+  });
+});
+
+describe("filterTrustedDispatchMarkers", () => {
+  const key = "pull_request:26:abc:ci_failed";
+  const trustedMarkerBody = formatDispatchMarker({ key, dispatchedAt: "2026-09-02T00:00:00Z" });
+
+  it("counts a marker only when authored by the trusted identity", () => {
+    const markers = filterTrustedDispatchMarkers([
+      { body: trustedMarkerBody, author: { login: DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type: DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE } },
+    ]);
+    expect(markers).toEqual([{ key, dispatchedAt: "2026-09-02T00:00:00Z" }]);
+  });
+
+  it("discards an identical, well-formed marker forged by an untrusted commenter", () => {
+    const forgedBody = formatDispatchMarker({ key, dispatchedAt: "2099-01-01T00:00:00Z" });
+    const markers = filterTrustedDispatchMarkers([
+      { body: forgedBody, author: { login: "some-attacker", type: "User" } },
+    ]);
+    expect(markers).toEqual([]);
+  });
+
+  it("discards a marker from a bot with the right login but wrong type", () => {
+    const markers = filterTrustedDispatchMarkers([
+      { body: trustedMarkerBody, author: { login: DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type: "User" } },
+    ]);
+    expect(markers).toEqual([]);
   });
 });
 

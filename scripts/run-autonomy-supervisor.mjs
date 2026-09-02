@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { runAutonomySupervisor } from "./lib/supervisor-run.mjs";
-import { isCiRelevantCheckName, isIndependentReviewerLogin } from "./lib/supervisor-policy.mjs";
-import { parseDispatchMarker } from "./lib/supervisor-idempotency.mjs";
+import { summarizeGovernanceCheckRuns } from "./lib/supervisor-ci.mjs";
+import { buildOwnerVerdictEvents } from "./lib/supervisor-verdicts.mjs";
+import { filterTrustedDispatchMarkers } from "./lib/supervisor-idempotency.mjs";
 import { shouldHandleEvent } from "./lib/supervisor-event-guard.mjs";
 import {
   dispatchToWorkspaceAgent,
@@ -76,42 +77,31 @@ async function githubPaginated(token, initialUrl, extractItems) {
   return items;
 }
 
-function summarizeCheckRuns(checkRuns, headSha) {
-  const relevant = checkRuns.filter((run) => isCiRelevantCheckName(run.name));
-  if (relevant.length === 0) return null;
-  const allCompleted = relevant.every((run) => run.status === "completed");
-  if (!allCompleted) return { headSha, conclusion: "pending" };
-  const anyFailed = relevant.some((run) => !["success", "neutral", "skipped"].includes(run.conclusion));
-  return { headSha, conclusion: anyFailed ? "failure" : "success" };
+function normalizeCheckRun(run) {
+  return { name: run.name, status: run.status, conclusion: run.conclusion, startedAt: run.started_at };
 }
 
-function mapReviewState(state) {
-  if (state === "APPROVED") return "approved";
-  if (state === "CHANGES_REQUESTED") return "changes_requested";
-  if (state === "DISMISSED") return "dismissed";
-  return null; // COMMENTED and any other non-verdict state is not evidence.
+function buildReviewsForVerdicts(reviews) {
+  return reviews.map((review) => ({
+    authorLogin: review.user?.login,
+    body: review.body,
+    state: review.state,
+    headSha: review.commit_id,
+    submittedAt: review.submitted_at,
+  }));
 }
 
-/**
- * Builds the chronologically-orderable review-event list consumed by
- * evaluatePullRequestAction. Every event is independently timestamped
- * (`submitted_at`) rather than collapsed to "the latest" here, so the pure
- * policy layer - not this wiring - is the single place that decides which
- * exact-head verdict is chronologically authoritative (selectLatestReviewEvent
- * is what actually resolves the PR #24 stale-verdict race).
- */
-function buildReviewEvents(reviews) {
-  const events = [];
-  for (const review of reviews) {
-    if (!isIndependentReviewerLogin(review.user?.login)) continue;
-    const state = mapReviewState(review.state);
-    if (state === null) continue;
-    events.push({ headSha: review.commit_id, state, submittedAt: review.submitted_at });
-  }
-  return events;
+function buildCommentsForVerdicts(comments) {
+  return comments.map((comment) => ({
+    authorLogin: comment.user?.login,
+    body: comment.body,
+    createdAt: comment.created_at,
+  }));
 }
 
-function makeDeps({ token, owner, repo, agentId, agentToken }) {
+function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
+  const repositoryFullName = `${owner}/${repo}`;
+
   return {
     now: new Date(),
 
@@ -124,7 +114,7 @@ function makeDeps({ token, owner, repo, agentId, agentToken }) {
       const snapshots = [];
       for (const pull of pulls) {
         const headSha = pull.head.sha;
-        const [checkRuns, reviews] = await Promise.all([
+        const [checkRuns, reviews, comments] = await Promise.all([
           githubPaginated(
             token,
             `${GITHUB_API}/repos/${owner}/${repo}/commits/${headSha}/check-runs?per_page=100`,
@@ -135,14 +125,23 @@ function makeDeps({ token, owner, repo, agentId, agentToken }) {
             `${GITHUB_API}/repos/${owner}/${repo}/pulls/${pull.number}/reviews?per_page=100`,
             (page) => page,
           ),
+          githubPaginated(
+            token,
+            `${GITHUB_API}/repos/${owner}/${repo}/issues/${pull.number}/comments?per_page=100`,
+            (page) => page,
+          ),
         ]);
         snapshots.push({
           number: pull.number,
           headSha,
           isDraft: pull.draft === true,
           labels: (pull.labels ?? []).map((label) => label.name),
-          checks: summarizeCheckRuns(checkRuns, headSha),
-          reviewEvents: buildReviewEvents(reviews),
+          checks: summarizeGovernanceCheckRuns(checkRuns.map(normalizeCheckRun), headSha),
+          ownerVerdictEvents: buildOwnerVerdictEvents({
+            ownerLogin,
+            comments: buildCommentsForVerdicts(comments),
+            reviews: buildReviewsForVerdicts(reviews),
+          }),
         });
       }
       return snapshots;
@@ -170,7 +169,9 @@ function makeDeps({ token, owner, repo, agentId, agentToken }) {
         `${GITHUB_API}/repos/${owner}/${repo}/issues/${number}/comments?per_page=100`,
         (page) => page,
       );
-      return comments.map((comment) => parseDispatchMarker(comment.body)).filter((marker) => marker !== null);
+      return filterTrustedDispatchMarkers(
+        comments.map((comment) => ({ body: comment.body, author: { login: comment.user?.login, type: comment.user?.type } })),
+      );
     },
 
     async postDispatchMarker(_subjectType, number, markerBody) {
@@ -196,6 +197,7 @@ function makeDeps({ token, owner, repo, agentId, agentToken }) {
         idempotencyKey,
         reason,
         subject,
+        repositoryFullName,
         fetchImpl: fetch,
       });
     },
@@ -206,9 +208,11 @@ function makeDeps({ token, owner, repo, agentId, agentToken }) {
  * Decides, from the raw GitHub Actions event context, whether this
  * invocation should proceed to a full evaluation cycle at all. `schedule`
  * and `workflow_dispatch` always proceed (the recovery backstop and manual
- * path). Every other guarded event type is checked against
- * shouldHandleEvent's actor/repository/label/workflow-name/action guards
- * before any credential is read.
+ * path). Every other guarded event type requires a readable, parseable
+ * event payload - a missing or unreadable payload fails closed (never
+ * proceeds) rather than falling back to an unguarded scan - and is then
+ * checked against shouldHandleEvent's actor/repository/label/workflow-name
+ * guards, all before any credential is read.
  */
 function decideWhetherToHandleThisEvent() {
   const eventName = process.env.GITHUB_EVENT_NAME ?? "workflow_dispatch";
@@ -217,23 +221,31 @@ function decideWhetherToHandleThisEvent() {
   }
 
   const eventPath = process.env.GITHUB_EVENT_PATH;
-  if (typeof eventPath !== "string" || eventPath.trim().length === 0) {
-    return { handle: true, reason: "no_event_payload" };
+  let payload = null;
+  let payloadAvailable = false;
+  if (typeof eventPath === "string" && eventPath.trim().length > 0) {
+    try {
+      payload = JSON.parse(readFileSync(eventPath, "utf8"));
+      payloadAvailable = true;
+    } catch {
+      payloadAvailable = false;
+    }
   }
 
-  const payload = JSON.parse(readFileSync(eventPath, "utf8"));
-  const [owner, repo] = requireEnv("GITHUB_REPOSITORY").split("/");
+  const repository = process.env.GITHUB_REPOSITORY ?? "";
+  const [owner, repo] = repository.split("/");
 
   return shouldHandleEvent({
     eventName,
-    action: payload.action,
-    repositoryFullName: payload.repository?.full_name,
-    expectedRepositoryFullName: `${owner}/${repo}`,
-    senderLogin: payload.sender?.login,
-    senderType: payload.sender?.type,
-    isPullRequestComment: Boolean(payload.issue?.pull_request),
-    labels: (payload.issue?.labels ?? []).map((label) => (typeof label === "string" ? label : label.name)),
-    workflowName: payload.workflow_run?.name,
+    payloadAvailable,
+    action: payload?.action,
+    repositoryFullName: payload?.repository?.full_name,
+    expectedRepositoryFullName: owner && repo ? `${owner}/${repo}` : undefined,
+    senderLogin: payload?.sender?.login,
+    senderType: payload?.sender?.type,
+    isPullRequestComment: Boolean(payload?.issue?.pull_request),
+    labels: (payload?.issue?.labels ?? []).map((label) => (typeof label === "string" ? label : label.name)),
+    workflowName: payload?.workflow_run?.name,
   });
 }
 
@@ -249,8 +261,15 @@ async function main() {
   const agentId = validateAgentId(requireEnv("CHATGPT_WORKSPACE_AGENT_ID"));
   const agentToken = requireWorkspaceAgentToken(requireEnv("CHATGPT_WORKSPACE_AGENT_TOKEN"));
 
+  // The only trusted acceptance identity: the repository owner login, taken
+  // directly from repository metadata (the owner segment of
+  // GITHUB_REPOSITORY, which GitHub Actions always sets to this
+  // repository's own "owner/repo" identity) - never guessed, hardcoded, or
+  // read from issue/PR content.
+  const ownerLogin = owner;
+
   const results = await runAutonomySupervisor(
-    makeDeps({ token: githubToken, owner, repo, agentId, agentToken }),
+    makeDeps({ token: githubToken, owner, repo, ownerLogin, agentId, agentToken }),
   );
 
   for (const result of results) {

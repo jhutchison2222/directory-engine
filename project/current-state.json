@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-02T20:16:00Z",
+  "updated_at": "2026-09-02T20:35:28Z",
   "accepted_architecture": "ADR-001-national-niche-domains",
   "repository_baseline": "a0b36cb964aa53b76f6c5f436bc94a2e77d1e7b6",
   "repository_capability": "contains_write_paths",
@@ -9,10 +9,10 @@
   "auto_merge_enabled": false,
   "production_mutations_authorized": false,
   "active_work_packet": "DE-0010",
-  "next_step": "Complete bounded DE-0010 review and remediation of the repository-native autonomous supervisor, require exact-head Project governance and independent Codex acceptance, then merge before configuring the dedicated Workspace Agent credentials and running the authorized harmless dispatch proof. No Cloudflare, WordPress, GeoDirectory, D1, DNS, domain, deployment, production, customer, payment, or other-repository operation is authorized.",
+  "next_step": "DE-0010 remediation cycle 2/3 is pushed for exact-head Codex/owner review: owner-only acceptance chronology, trusted-marker-author dispatch ledger, named-governance-check CI evidence, a remediation-cycle retry cap spanning equivalent reasons, a bounded non-secret dispatch instruction, and event-guard fail-closed behavior on a missing/unreadable payload. Require a fresh exact-head Project governance run and independent owner acceptance before merge; secure Workspace Agent credential configuration and the authorized harmless live-dispatch proof remain pending and unverified. No Cloudflare, WordPress, GeoDirectory, D1, DNS, domain, deployment, production, customer, payment, or other-repository operation is authorized.",
   "notes": [
     "The repository README still describes v0.2.0 as read-only while current main contains write-path source code; deployment state must not be inferred from either statement.",
     "No WordPress, Cloudflare, GeoDirectory, D1, DNS, deployment, secret, redirect, listing, indexation, customer, or payment change is authorized by this state file.",
-    "DE-0002's exact-head Project governance run 33555688873 ended without executing a job and did not prove the maker/CI/reviewer/remediation/delta loop end to end. DE-0004 and later App-authenticated runs proved the corrected CI path. DE-0006 through DE-0008 established and hardened the nationwide contracts. DE-0009 merged as PR #24, then DE-0009-R2 (PR #28) corrected credential-guard and stale-acceptance gaps and merged as a0b36cb964aa53b76f6c5f436bc94a2e77d1e7b6. DE-0010 is the current bounded repository-native supervisor packet. Its workflow and code remain under review; secure Workspace Agent configuration and the harmless dispatch proof remain pending. None of these authorize any staging, production, or live-system operation."
+    "DE-0002's exact-head Project governance run 33555688873 ended without executing a job and did not prove the maker/CI/reviewer/remediation/delta loop end to end. DE-0004 and later App-authenticated runs proved the corrected CI path. DE-0006 through DE-0008 established and hardened the nationwide contracts. DE-0009 merged as PR #24, then DE-0009-R2 (PR #28) corrected credential-guard and stale-acceptance gaps and merged as a0b36cb964aa53b76f6c5f436bc94a2e77d1e7b6. DE-0010 is the current bounded repository-native supervisor packet, now on remediation cycle 2/3: it removes the previously-guessed third-party reviewer allowlist in favor of owner-only exact-head acceptance chronology, restricts dispatch-marker trust to the github-actions[bot] identity, requires a named 'Project governance' CI run at the exact head, and bounds the remediation-cycle retry budget across equivalent reasons. Secure Workspace Agent credential configuration and the harmless live-dispatch proof remain unverified and unattempted. None of these authorize any staging, production, or live-system operation."
   ]
 }

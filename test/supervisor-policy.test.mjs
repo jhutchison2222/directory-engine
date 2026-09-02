@@ -6,18 +6,15 @@ import {
   MAX_DISPATCH_ATTEMPTS_PER_KEY,
   REASONS,
   RETRY_INTERVAL_MS,
-  TRUSTED_INDEPENDENT_REVIEWER_LOGINS,
   computeIssueStateFingerprint,
   evaluateIssueAction,
   evaluatePullRequestAction,
   findActiveHoldLabel,
-  isCiRelevantCheckName,
-  isIndependentReviewerLogin,
   isRetryDue,
-  selectLatestReviewEvent,
   selectQueuedTasks,
 } from "../scripts/lib/supervisor-policy.mjs";
 import { buildIdempotencyKey } from "../scripts/lib/supervisor-idempotency.mjs";
+import { OWNER_VERDICT_KINDS } from "../scripts/lib/supervisor-verdicts.mjs";
 
 const NOW = new Date("2026-09-02T12:00:00Z");
 const HEAD_A = "a".repeat(40);
@@ -30,62 +27,14 @@ function pr(overrides = {}) {
     isDraft: false,
     labels: [],
     checks: null,
-    reviewEvents: [],
+    ownerVerdictEvents: [],
     ...overrides,
   };
 }
 
-describe("isIndependentReviewerLogin", () => {
-  it("accepts every trusted allowlisted login", () => {
-    for (const login of TRUSTED_INDEPENDENT_REVIEWER_LOGINS) {
-      expect(isIndependentReviewerLogin(login)).toBe(true);
-    }
-  });
-
-  it("rejects any login associated with the Claude implementer identity, even if allowlisted-looking", () => {
-    expect(isIndependentReviewerLogin("claude")).toBe(false);
-    expect(isIndependentReviewerLogin("claude[bot]")).toBe(false);
-    expect(isIndependentReviewerLogin("Claude-Code")).toBe(false);
-  });
-
-  it("rejects a generic third-party reviewer login not on the trusted allowlist", () => {
-    expect(isIndependentReviewerLogin("codex-reviewer-bot")).toBe(false);
-    expect(isIndependentReviewerLogin("some-random-approver")).toBe(false);
-  });
-
-  it("rejects github-actions[bot] and other generic bot logins", () => {
-    expect(isIndependentReviewerLogin("github-actions[bot]")).toBe(false);
-    expect(isIndependentReviewerLogin("dependabot[bot]")).toBe(false);
-  });
-
-  it("rejects a missing login", () => {
-    expect(isIndependentReviewerLogin(undefined)).toBe(false);
-    expect(isIndependentReviewerLogin("")).toBe(false);
-  });
-});
-
-describe("isCiRelevantCheckName", () => {
-  it("accepts an ordinary CI check name", () => {
-    expect(isCiRelevantCheckName("Project governance")).toBe(true);
-    expect(isCiRelevantCheckName("test")).toBe(true);
-  });
-
-  it("excludes Claude's own review check to avoid a circular/non-CI signal", () => {
-    expect(isCiRelevantCheckName("Claude")).toBe(false);
-    expect(isCiRelevantCheckName("Claude Code Review")).toBe(false);
-  });
-
-  it("excludes the supervisor's own check to avoid a self-referential CI signal", () => {
-    expect(isCiRelevantCheckName("Autonomy supervisor")).toBe(false);
-    expect(isCiRelevantCheckName("Autonomy Supervisor / supervise")).toBe(false);
-  });
-
-  it("rejects a missing or empty name", () => {
-    expect(isCiRelevantCheckName(undefined)).toBe(false);
-    expect(isCiRelevantCheckName("")).toBe(false);
-    expect(isCiRelevantCheckName("   ")).toBe(false);
-  });
-});
+function verdict(kind, headSha, submittedAt) {
+  return { kind, headSha, submittedAt };
+}
 
 describe("findActiveHoldLabel", () => {
   it("returns null when no hold label is present", () => {
@@ -138,8 +87,8 @@ describe("evaluatePullRequestAction: security/major-decision holds", () => {
   });
 });
 
-describe("evaluatePullRequestAction: exact-head CI state", () => {
-  it("dispatches ci_failed when checks fail at the exact current head", () => {
+describe("evaluatePullRequestAction: exact-head governance CI state", () => {
+  it("dispatches ci_failed when governance checks fail at the exact current head", () => {
     const decision = evaluatePullRequestAction(pr({ checks: { headSha: HEAD_A, conclusion: "failure" } }), NOW);
     expect(decision.action).toBe("dispatch");
     expect(decision.reason).toBe(REASONS.CI_FAILED);
@@ -156,79 +105,87 @@ describe("evaluatePullRequestAction: exact-head CI state", () => {
   it("skips when there is no check evidence at all", () => {
     expect(evaluatePullRequestAction(pr(), NOW)).toEqual({ action: "skip", reason: "awaiting_ci" });
   });
+
+  it("reports a pending exact-head governance run as awaiting_ci, not awaiting_review", () => {
+    const decision = evaluatePullRequestAction(
+      pr({ checks: { headSha: HEAD_A, conclusion: "pending" } }),
+      NOW,
+    );
+    expect(decision).toEqual({ action: "skip", reason: "awaiting_ci" });
+  });
 });
 
-describe("evaluatePullRequestAction: exact-head review state", () => {
+describe("evaluatePullRequestAction: exact-head owner verdict chronology", () => {
   const passingChecks = { headSha: HEAD_A, conclusion: "success" };
 
-  it("dispatches review_missing when checks pass but no independent review exists at head", () => {
-    const decision = evaluatePullRequestAction(pr({ checks: passingChecks, reviewEvents: [] }), NOW);
+  it("dispatches review_missing when checks pass but no owner verdict exists at head", () => {
+    const decision = evaluatePullRequestAction(pr({ checks: passingChecks, ownerVerdictEvents: [] }), NOW);
     expect(decision.action).toBe("dispatch");
     expect(decision.reason).toBe(REASONS.REVIEW_MISSING);
   });
 
-  it("treats a review recorded against a stale head as missing", () => {
+  it("treats an owner verdict recorded against a stale head as missing", () => {
     const decision = evaluatePullRequestAction(
       pr({
         checks: passingChecks,
-        reviewEvents: [{ headSha: HEAD_B, state: "approved", submittedAt: "2026-09-02T10:00:00Z" }],
+        ownerVerdictEvents: [verdict(OWNER_VERDICT_KINDS.ACCEPTED, HEAD_B, "2026-09-02T10:00:00Z")],
       }),
       NOW,
     );
     expect(decision.reason).toBe(REASONS.REVIEW_MISSING);
   });
 
-  it("dispatches review_rejected on an exact-head changes_requested review", () => {
+  it("dispatches review_rejected on an exact-head REJECTED owner verdict", () => {
     const decision = evaluatePullRequestAction(
       pr({
         checks: passingChecks,
-        reviewEvents: [{ headSha: HEAD_A, state: "changes_requested", submittedAt: "2026-09-02T10:00:00Z" }],
+        ownerVerdictEvents: [verdict(OWNER_VERDICT_KINDS.REJECTED, HEAD_A, "2026-09-02T10:00:00Z")],
       }),
       NOW,
     );
     expect(decision.reason).toBe(REASONS.REVIEW_REJECTED);
   });
 
-  it("dispatches review_rejected on an exact-head dismissed review (supersession)", () => {
+  it("dispatches review_rejected on an exact-head SUPERSEDED owner verdict", () => {
     const decision = evaluatePullRequestAction(
       pr({
         checks: passingChecks,
-        reviewEvents: [{ headSha: HEAD_A, state: "dismissed", submittedAt: "2026-09-02T10:00:00Z" }],
+        ownerVerdictEvents: [verdict(OWNER_VERDICT_KINDS.SUPERSEDED, HEAD_A, "2026-09-02T10:00:00Z")],
       }),
       NOW,
     );
     expect(decision.reason).toBe(REASONS.REVIEW_REJECTED);
   });
 
-  it("dispatches merge_ready on an exact-head approved review", () => {
+  it("dispatches review_rejected on an exact-head REMEDIATION_REQUESTED owner verdict", () => {
     const decision = evaluatePullRequestAction(
       pr({
         checks: passingChecks,
-        reviewEvents: [{ headSha: HEAD_A, state: "approved", submittedAt: "2026-09-02T10:00:00Z" }],
+        ownerVerdictEvents: [verdict(OWNER_VERDICT_KINDS.REMEDIATION_REQUESTED, HEAD_A, "2026-09-02T10:00:00Z")],
+      }),
+      NOW,
+    );
+    expect(decision.reason).toBe(REASONS.REVIEW_REJECTED);
+  });
+
+  it("dispatches merge_ready on an exact-head ACCEPTED owner verdict", () => {
+    const decision = evaluatePullRequestAction(
+      pr({
+        checks: passingChecks,
+        ownerVerdictEvents: [verdict(OWNER_VERDICT_KINDS.ACCEPTED, HEAD_A, "2026-09-02T10:00:00Z")],
       }),
       NOW,
     );
     expect(decision.reason).toBe(REASONS.MERGE_READY);
   });
 
-  it("skips while an exact-head review is still pending", () => {
-    const decision = evaluatePullRequestAction(
-      pr({
-        checks: passingChecks,
-        reviewEvents: [{ headSha: HEAD_A, state: "pending", submittedAt: "2026-09-02T10:00:00Z" }],
-      }),
-      NOW,
-    );
-    expect(decision).toEqual({ action: "skip", reason: "awaiting_review" });
-  });
-
   it("PR #24 stale-verdict race: a later rejection at the same exact head overrides an earlier acceptance", () => {
     const decision = evaluatePullRequestAction(
       pr({
         checks: passingChecks,
-        reviewEvents: [
-          { headSha: HEAD_A, state: "approved", submittedAt: "2026-09-02T09:00:00Z" },
-          { headSha: HEAD_A, state: "changes_requested", submittedAt: "2026-09-02T11:00:00Z" },
+        ownerVerdictEvents: [
+          verdict(OWNER_VERDICT_KINDS.ACCEPTED, HEAD_A, "2026-09-02T09:00:00Z"),
+          verdict(OWNER_VERDICT_KINDS.REJECTED, HEAD_A, "2026-09-02T11:00:00Z"),
         ],
       }),
       NOW,
@@ -241,34 +198,45 @@ describe("evaluatePullRequestAction: exact-head review state", () => {
     const decision = evaluatePullRequestAction(
       pr({
         checks: passingChecks,
-        reviewEvents: [
-          { headSha: HEAD_A, state: "changes_requested", submittedAt: "2026-09-02T09:00:00Z" },
-          { headSha: HEAD_A, state: "approved", submittedAt: "2026-09-02T11:00:00Z" },
+        ownerVerdictEvents: [
+          verdict(OWNER_VERDICT_KINDS.REJECTED, HEAD_A, "2026-09-02T09:00:00Z"),
+          verdict(OWNER_VERDICT_KINDS.ACCEPTED, HEAD_A, "2026-09-02T11:00:00Z"),
         ],
       }),
       NOW,
     );
     expect(decision.reason).toBe(REASONS.MERGE_READY);
   });
-});
 
-describe("selectLatestReviewEvent", () => {
-  it("returns null when no event matches the exact head", () => {
-    expect(
-      selectLatestReviewEvent([{ headSha: HEAD_B, state: "approved", submittedAt: "2026-09-02T09:00:00Z" }], HEAD_A),
-    ).toBeNull();
+  it("a later owner REMEDIATION_REQUESTED supersedes an earlier ACCEPTED at the same exact head", () => {
+    const decision = evaluatePullRequestAction(
+      pr({
+        checks: passingChecks,
+        ownerVerdictEvents: [
+          verdict(OWNER_VERDICT_KINDS.ACCEPTED, HEAD_A, "2026-09-02T09:00:00Z"),
+          verdict(OWNER_VERDICT_KINDS.REMEDIATION_REQUESTED, HEAD_A, "2026-09-02T11:00:00Z"),
+        ],
+      }),
+      NOW,
+    );
+    expect(decision.reason).toBe(REASONS.REVIEW_REJECTED);
   });
 
-  it("returns the chronologically latest event at the exact head", () => {
-    const latest = selectLatestReviewEvent(
-      [
-        { headSha: HEAD_A, state: "approved", submittedAt: "2026-09-02T09:00:00Z" },
-        { headSha: HEAD_A, state: "dismissed", submittedAt: "2026-09-02T10:00:00Z" },
-        { headSha: HEAD_B, state: "approved", submittedAt: "2026-09-02T12:00:00Z" },
-      ],
-      HEAD_A,
+  it("a non-actionable follow-up (no classified verdict) never overwrites an earlier real acceptance", () => {
+    // Regression: a prior design collapsed every review event (including
+    // GitHub's non-actionable COMMENTED state) into "the latest at head",
+    // so a comment-only follow-up review after a real approval silently
+    // stalled merge-ready dispatch. Because unclassifiable events are never
+    // added to ownerVerdictEvents at all (see buildOwnerVerdictEvents), the
+    // earlier ACCEPTED remains the only, and therefore latest, event.
+    const decision = evaluatePullRequestAction(
+      pr({
+        checks: passingChecks,
+        ownerVerdictEvents: [verdict(OWNER_VERDICT_KINDS.ACCEPTED, HEAD_A, "2026-09-02T09:00:00Z")],
+      }),
+      NOW,
     );
-    expect(latest).toEqual({ headSha: HEAD_A, state: "dismissed", submittedAt: "2026-09-02T10:00:00Z" });
+    expect(decision.reason).toBe(REASONS.MERGE_READY);
   });
 });
 
@@ -325,46 +293,65 @@ describe("evaluatePullRequestAction: idempotency and retry timing", () => {
   });
 });
 
-describe("evaluatePullRequestAction: bounded retries and autonomy-blocked", () => {
+describe("evaluatePullRequestAction: bounded retries span equivalent remediation reasons", () => {
   const failingChecks = { headSha: HEAD_A, conclusion: "failure" };
+  const passingChecks = { headSha: HEAD_A, conclusion: "success" };
 
-  function dispatchesAtCount(count) {
-    const idempotencyKey = buildIdempotencyKey({
-      subjectType: "pull_request",
-      subjectNumber: 26,
-      stateId: HEAD_A,
-      reason: REASONS.CI_FAILED,
-    });
-    const dispatches = [];
-    for (let i = 0; i < count; i += 1) {
-      dispatches.push({
-        key: idempotencyKey,
-        dispatchedAt: new Date(NOW.getTime() - RETRY_INTERVAL_MS * (count - i)).toISOString(),
-      });
-    }
-    return { idempotencyKey, dispatches };
+  function dispatchAt(reason, secondsAgo) {
+    return {
+      key: buildIdempotencyKey({ subjectType: "pull_request", subjectNumber: 26, stateId: HEAD_A, reason }),
+      dispatchedAt: new Date(NOW.getTime() - secondsAgo * 1000).toISOString(),
+    };
   }
 
-  it(`still allows a dispatch at ${MAX_DISPATCH_ATTEMPTS_PER_KEY - 1} prior attempts`, () => {
-    const { dispatches } = dispatchesAtCount(MAX_DISPATCH_ATTEMPTS_PER_KEY - 1);
+  it(`still allows a dispatch at ${MAX_DISPATCH_ATTEMPTS_PER_KEY - 1} prior attempts of the same reason`, () => {
+    const dispatches = [dispatchAt(REASONS.CI_FAILED, 7200), dispatchAt(REASONS.CI_FAILED, 3600)];
     const decision = evaluatePullRequestAction(pr({ checks: failingChecks }), NOW, dispatches);
     expect(decision.action).toBe("dispatch");
   });
 
-  it(`blocks instead of dispatching once ${MAX_DISPATCH_ATTEMPTS_PER_KEY} attempts have already been made for the same exact-head key`, () => {
-    const { dispatches, idempotencyKey } = dispatchesAtCount(MAX_DISPATCH_ATTEMPTS_PER_KEY);
+  it(`blocks once ${MAX_DISPATCH_ATTEMPTS_PER_KEY} attempts have already been made for the same exact head, even across different equivalent reasons`, () => {
+    const dispatches = [
+      dispatchAt(REASONS.CI_FAILED, 10800),
+      dispatchAt(REASONS.REVIEW_MISSING, 7200),
+      dispatchAt(REASONS.REVIEW_REJECTED, 3600),
+    ];
     const decision = evaluatePullRequestAction(pr({ checks: failingChecks }), NOW, dispatches);
-    expect(decision).toEqual({ action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey });
+    expect(decision.action).toBe("blocked");
+    expect(decision.reason).toBe(AUTONOMY_BLOCKED_REASON);
   });
 
-  it("a new head resets the attempt budget even if the old head was fully exhausted", () => {
-    const { dispatches } = dispatchesAtCount(MAX_DISPATCH_ATTEMPTS_PER_KEY);
+  it("a new head resets the attempt budget even if the old head was fully exhausted across mixed reasons", () => {
+    const dispatches = [
+      dispatchAt(REASONS.CI_FAILED, 10800),
+      dispatchAt(REASONS.REVIEW_MISSING, 7200),
+      dispatchAt(REASONS.REVIEW_REJECTED, 3600),
+    ];
     const decision = evaluatePullRequestAction(
       pr({ headSha: HEAD_B, checks: { headSha: HEAD_B, conclusion: "failure" } }),
       NOW,
       dispatches,
     );
     expect(decision.action).toBe("dispatch");
+  });
+
+  it("merge_ready dispatch is independently idempotent and is never blocked by the remediation attempt cap", () => {
+    const dispatches = [
+      dispatchAt(REASONS.CI_FAILED, 14400),
+      dispatchAt(REASONS.REVIEW_MISSING, 10800),
+      dispatchAt(REASONS.REVIEW_REJECTED, 7200),
+      dispatchAt(REASONS.MERGE_READY, 3600),
+    ];
+    const decision = evaluatePullRequestAction(
+      pr({
+        checks: passingChecks,
+        ownerVerdictEvents: [verdict(OWNER_VERDICT_KINDS.ACCEPTED, HEAD_A, "2026-09-02T08:00:00Z")],
+      }),
+      NOW,
+      dispatches,
+    );
+    expect(decision.action).toBe("dispatch");
+    expect(decision.reason).toBe(REASONS.MERGE_READY);
   });
 });
 
