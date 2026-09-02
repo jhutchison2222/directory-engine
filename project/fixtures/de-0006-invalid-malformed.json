@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "niche_domain": "example-water-heater-repair.com",
+  "service_taxonomy": ["water-heater-repair"],
+  "canonical_urls": [
+    { "path": "/colorado//denver/", "kind": "city" }
+  ],
+  "listings": [],
+  "redirects": []
+}

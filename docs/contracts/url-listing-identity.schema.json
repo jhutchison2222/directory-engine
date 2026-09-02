@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://directory-engine.invalid/schemas/url-listing-identity.schema.json",
+  "title": "Directory Engine nationwide URL and listing identity contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "niche_domain",
+    "service_taxonomy",
+    "canonical_urls",
+    "listings",
+    "redirects"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "niche_domain": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)*\\.[a-z]{2,}$"
+    },
+    "service_taxonomy": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" }
+    },
+    "canonical_urls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["state", "city", "neighborhood", "service_area", "business"] }
+        }
+      }
+    },
+    "listings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "branch_id",
+          "organization_id",
+          "canonical_path",
+          "state",
+          "city",
+          "served_areas",
+          "metro",
+          "services",
+          "indexable",
+          "sitemap_eligible",
+          "indexation_readiness"
+        ],
+        "properties": {
+          "branch_id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          "organization_id": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          "canonical_path": { "type": "string", "minLength": 1 },
+          "state": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          "city": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+          "served_areas": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" }
+          },
+          "metro": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "services": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" }
+          },
+          "indexable": { "type": "boolean" },
+          "sitemap_eligible": { "type": "boolean" },
+          "indexation_readiness": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "has_listings",
+              "data_quality_checked",
+              "has_unique_content",
+              "canonical_validated",
+              "internally_linked"
+            ],
+            "properties": {
+              "has_listings": { "type": "boolean" },
+              "data_quality_checked": { "type": "boolean" },
+              "has_unique_content": { "type": "boolean" },
+              "canonical_validated": { "type": "boolean" },
+              "internally_linked": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "redirects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "to", "reason", "status"],
+        "properties": {
+          "from": { "type": "string", "minLength": 1 },
+          "to": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 },
+          "status": { "const": 301 }
+        }
+      }
+    }
+  }
+}
