@@ -70,13 +70,49 @@
  * path must be ineligible for merge-ready dispatch") over attempting a more
  * permissive but judgment-based classification.
  *
+ * DE-0010-R1 cycle 3 (evidence-completeness and toolchain-input coverage):
+ * two further deterministic bypasses of cycle 2's decision-path check
+ * remained, both flagged by exact-head review.
+ *
+ * First, `changedFilePaths` was trusted as complete evidence even though its
+ * source - GitHub's `compare` API - documents a hard cap of 300 changed
+ * files per comparison
+ * (https://docs.github.com/en/rest/commits/commits#compare-two-commits). A
+ * pull request touching more than 300 files could place a decision-path
+ * edit past that cap, where it would never appear in the returned list, and
+ * still be reported `"success"`. `changedFilePaths` reaching or exceeding
+ * `CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP` is now treated exactly like a
+ * missing/unreadable diff: fail-closed `"untrusted"`, because completeness
+ * can no longer be proven at that size. This repository's pull requests
+ * have never approached that size, so no legitimate change is expected to
+ * be affected; a pull request that legitimately needs to touch that many
+ * files falls back to requiring a human owner's exact-head review, the same
+ * posture already used for any other decision-path change.
+ *
+ * Second, the fixed file set only protected the exact filenames
+ * `package.json`/`tsconfig.json`/`vitest.config.ts`, but `npm install`
+ * resolves dependencies through `package-lock.json`, `npm-shrinkwrap.json`,
+ * or `yarn.lock` when present
+ * (https://docs.npmjs.com/cli/v11/commands/npm-install/), and Vitest/Vite
+ * both support several recognized config/workspace filename variants and
+ * extensions capable of changing which tests run or how
+ * (https://v2.vitest.dev/guide/workspace.html) - none of which the fixed
+ * list matched. `GOVERNANCE_DECISION_PATH_FILES` now also lists the
+ * lock/shrinkwrap inputs, and `GOVERNANCE_DECISION_PATH_CONFIG_PATTERN`
+ * matches every supported extension of `vitest.config`, `vitest.workspace`,
+ * `vitest.projects`, and `vite.config` at the repository root (Vitest falls
+ * back to a discovered Vite config when it has none of its own), so adding
+ * a previously-unlisted variant can no longer evade the decision-path
+ * check.
+ *
  * Trust boundary (documented, not solved by this check): `changedFilePaths`
  * is sourced from GitHub's own compare API (`base...head`), anchored to the
  * pull request's recorded base branch and its exact current head SHA - never
  * from PR-supplied content - so the list itself cannot be spoofed by the
- * pull request. Ordinary application code under `src/`, documentation, and
- * project state/fixtures are deliberately *not* part of the decision path,
- * so an ordinary code change unrelated to governance/typecheck/test
+ * pull request, though it is only trusted below its documented completeness
+ * cap (see above). Ordinary application code under `src/`, documentation,
+ * and project state/fixtures are deliberately *not* part of the decision
+ * path, so an ordinary code change unrelated to governance/typecheck/test
  * enforcement still reaches a trusted `"success"` conclusion when the
  * workflow file is untouched and the run is genuinely green.
  */
@@ -149,16 +185,44 @@ export function isGovernanceWorkflowFileTrusted({ headContent, defaultBranchCont
  * what `npm run check:governance`/`typecheck`/`test` can catch: the
  * governance workflow file itself (also covered by
  * `isGovernanceWorkflowFileTrusted`'s byte comparison; listed here too for
- * defense in depth), the `npm` script definitions, and the TypeScript/test
- * runner configuration. A literal, frozen code constant - never read from
- * PR content - exactly like `GOVERNANCE_WORKFLOW_PATH` above.
+ * defense in depth), the `npm` script definitions, the TypeScript
+ * configuration, and every package-manager dependency-resolution input the
+ * workflow's `npm install` step can honor when present -
+ * `package-lock.json`/`npm-shrinkwrap.json` (npm itself) and `yarn.lock`
+ * (listed for the same reason `yarn.lock` support is documented on the
+ * install command generally: a future change to the install step must not
+ * silently reopen this gap). A literal, frozen code constant - never read
+ * from PR content - exactly like `GOVERNANCE_WORKFLOW_PATH` above. Vitest/Vite
+ * config and workspace filename variants are matched separately by
+ * `GOVERNANCE_DECISION_PATH_CONFIG_PATTERN` below, since they exist in
+ * several recognized extensions rather than one fixed name.
  */
 export const GOVERNANCE_DECISION_PATH_FILES = Object.freeze([
   GOVERNANCE_WORKFLOW_PATH,
   "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
   "tsconfig.json",
-  "vitest.config.ts",
 ]);
+
+/**
+ * Matches every supported extension of the Vitest/Vite config and workspace
+ * filenames capable of changing which tests `npm test` runs or how:
+ * `vitest.config`, `vitest.workspace`, `vitest.projects` (Vitest), and
+ * `vite.config` (Vitest falls back to a discovered Vite config when it has
+ * none of its own). Anchored so it only ever matches the exact root-level
+ * filename (optionally nested one directory deep, matching how these tools
+ * also discover a config file placed in a subdirectory) - never merely a
+ * path that happens to contain one of these words elsewhere.
+ */
+export const GOVERNANCE_DECISION_PATH_CONFIG_PATTERN =
+  /(?:^|\/)(?:vitest\.config|vitest\.workspace|vitest\.projects|vite\.config)\.(?:ts|mts|cts|js|mjs|cjs)$/;
+
+/** GitHub's compare API caps a single comparison at 300 changed files; see
+ * the module docstring's cycle 3 note above.
+ */
+export const CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP = 300;
 
 /**
  * The fixed, reviewed set of directory roots whose entire contents are the
@@ -182,7 +246,8 @@ export const GOVERNANCE_DECISION_PATH_DIRECTORIES = Object.freeze(["scripts/", "
 export function isGovernanceDecisionPathFile(path) {
   if (typeof path !== "string" || path.length === 0) return false;
   if (GOVERNANCE_DECISION_PATH_FILES.includes(path)) return true;
-  return GOVERNANCE_DECISION_PATH_DIRECTORIES.some((directory) => path.startsWith(directory));
+  if (GOVERNANCE_DECISION_PATH_DIRECTORIES.some((directory) => path.startsWith(directory))) return true;
+  return GOVERNANCE_DECISION_PATH_CONFIG_PATTERN.test(path);
 }
 
 /**
@@ -193,17 +258,21 @@ export function isGovernanceDecisionPathFile(path) {
  * workflow-file content is trusted (isGovernanceWorkflowFileTrusted), and
  * `changedFilePaths` - every file path GitHub's compare API reports as
  * different between the pull request's base branch and its exact head -
- * contains no governance decision-path file (isGovernanceDecisionPathFile).
- * `changedFilePaths` must be an array or the run is reported `"untrusted"`
- * (fail-closed: an unreadable/missing diff can never be treated as "nothing
- * changed, so trust it"). A completed, green-conclusion run that fails
- * either trust check - a tampered governance workflow file, or an untouched
- * workflow file alongside a tampered `package.json`/validator/test
- * decision-path file - is reported as `"untrusted"` instead of `"success"`,
- * regardless of the run's own conclusion. `"pending"` and `"failure"` pass
- * through unchanged: they already cannot unlock merge-ready dispatch on
- * their own, so neither trust check has anything to add for those two
- * conclusions.
+ * contains no governance decision-path file (isGovernanceDecisionPathFile),
+ * *and* is short enough to be trustworthy as complete evidence at all. A
+ * `changedFilePaths` array is required (an unreadable/missing diff can never
+ * be treated as "nothing changed, so trust it"), and reaching or exceeding
+ * `CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP` is treated identically: GitHub's
+ * compare API caps a single comparison at that many files, so a list at or
+ * above the cap can never be trusted to be the *complete* list - a
+ * decision-path edit could be sitting just past the cap, silently excluded.
+ * A completed, green-conclusion run that fails any trust check - a tampered
+ * governance workflow file, an untouched workflow file alongside a tampered
+ * decision-path file, or unprovably-complete changed-file evidence - is
+ * reported as `"untrusted"` instead of `"success"`, regardless of the run's
+ * own conclusion. `"pending"` and `"failure"` pass through unchanged: they
+ * already cannot unlock merge-ready dispatch on their own, so neither trust
+ * check has anything to add for those two conclusions.
  */
 export function evaluateGovernanceEvidence({ workflowRuns, headSha, workflowFileTrust, changedFilePaths }) {
   const summary = summarizeGovernanceWorkflowRuns(workflowRuns, headSha);
@@ -211,7 +280,11 @@ export function evaluateGovernanceEvidence({ workflowRuns, headSha, workflowFile
   if (!isGovernanceWorkflowFileTrusted(workflowFileTrust ?? {})) {
     return { headSha, conclusion: "untrusted" };
   }
-  if (!Array.isArray(changedFilePaths) || changedFilePaths.some(isGovernanceDecisionPathFile)) {
+  if (
+    !Array.isArray(changedFilePaths) ||
+    changedFilePaths.length >= CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP ||
+    changedFilePaths.some(isGovernanceDecisionPathFile)
+  ) {
     return { headSha, conclusion: "untrusted" };
   }
   return summary;

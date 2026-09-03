@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP,
   GOVERNANCE_WORKFLOW_NAME,
   GOVERNANCE_WORKFLOW_PATH,
   evaluateGovernanceEvidence,
@@ -242,6 +243,30 @@ describe("isGovernanceDecisionPathFile", () => {
     expect(isGovernanceDecisionPathFile(undefined)).toBe(false);
     expect(isGovernanceDecisionPathFile("")).toBe(false);
   });
+
+  it("DE-0010-R1 cycle 3: matches every package-manager dependency-resolution input npm install can honor", () => {
+    expect(isGovernanceDecisionPathFile("package-lock.json")).toBe(true);
+    expect(isGovernanceDecisionPathFile("npm-shrinkwrap.json")).toBe(true);
+    expect(isGovernanceDecisionPathFile("yarn.lock")).toBe(true);
+  });
+
+  it("DE-0010-R1 cycle 3: matches every supported Vitest/Vite config and workspace filename variant, not only the one currently in use", () => {
+    // vitest.config.ts is already covered by the fixed-file list above; the
+    // point of this regression is the *other* recognized variants, which a
+    // pull request could add without ever touching vitest.config.ts itself.
+    expect(isGovernanceDecisionPathFile("vitest.config.mts")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vitest.config.js")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vitest.workspace.ts")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vitest.projects.ts")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vite.config.ts")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vite.config.mjs")).toBe(true);
+  });
+
+  it("DE-0010-R1 cycle 3: the config-variant pattern never matches an unrelated path that merely contains the same words", () => {
+    expect(isGovernanceDecisionPathFile("src/vitest.config.ts.md")).toBe(false);
+    expect(isGovernanceDecisionPathFile("docs/vite.config.ts.example")).toBe(false);
+    expect(isGovernanceDecisionPathFile("src/notvitest.config.ts")).toBe(false);
+  });
 });
 
 describe("evaluateGovernanceEvidence", () => {
@@ -384,5 +409,49 @@ describe("evaluateGovernanceEvidence", () => {
       changedFilePaths: ["package.json"],
     });
     expect(result).toBeNull();
+  });
+
+  it("DE-0010-R1 cycle 3 regression: a changed-file list at or above GitHub's compare-API completeness cap is never trusted, even with no visible decision-path file", () => {
+    // The exact bypass exact-head review identified: a pull request touching
+    // more than 300 files could place a decision-path edit past the compare
+    // API's 300-file cap, where it would never appear in this list at all.
+    const atCap = Array.from({ length: CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP }, (_, index) => `src/file-${index}.ts`);
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: atCap,
+    });
+    expect(result).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+
+    const belowCap = Array.from(
+      { length: CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP - 1 },
+      (_, index) => `src/file-${index}.ts`,
+    );
+    const trusted = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: belowCap,
+    });
+    expect(trusted).toEqual({ headSha: HEAD_A, conclusion: "success" });
+  });
+
+  it("DE-0010-R1 cycle 3 regression: a same-repository pull request that keeps the governance workflow byte-identical but adds a lockfile or an unlisted Vitest/Vite config variant is never trusted", () => {
+    const lockfileAdded = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["package-lock.json"],
+    });
+    expect(lockfileAdded).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+
+    const workspaceConfigAdded = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["vitest.workspace.ts"],
+    });
+    expect(workspaceConfigAdded).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
   });
 });

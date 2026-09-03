@@ -172,9 +172,12 @@ async function fetchFileContentAtRef(token, owner, repo, path, ref) {
  * away (or into) the governance decision path is still caught.
  *
  * Known bound: GitHub's compare API reports at most the first 300 changed
- * files. A pull request touching more files than that would have any files
- * beyond the cap silently excluded from this list; this repository's pull
- * requests have never approached that size.
+ * files, so a comparison touching more files than that would have any files
+ * beyond the cap silently excluded from this list. This function does not
+ * itself guard against that - `evaluateGovernanceEvidence` in
+ * supervisor-ci.mjs treats any list at or above that same 300-file cap as
+ * unprovably incomplete and fails closed to `"untrusted"`, so an oversized
+ * comparison can never be mistaken for a complete, trustworthy one.
  */
 async function fetchChangedFilePaths(token, owner, repo, base, headSha) {
   try {

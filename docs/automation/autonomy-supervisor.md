@@ -280,32 +280,56 @@ under `scripts/lib/`:
   conclusion, regardless of the workflow file's own byte-identity or the
   run's own conclusion.
 
+  **DE-0010-R1 cycle 3 (evidence-completeness and toolchain-input
+  coverage):** two further deterministic bypasses of cycle 2's check
+  remained. First, GitHub's compare API caps a single comparison at 300
+  changed files; `changedFilePaths` was trusted as complete evidence even
+  above that cap, so a pull request touching more than 300 files could place
+  a decision-path edit past the cap, where it would never appear in the
+  returned list and would never be caught. `evaluateGovernanceEvidence` now
+  also fails closed to `"untrusted"` whenever `changedFilePaths.length` is at
+  or above `CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP` (300) - a list that large
+  can no longer be trusted to be *complete*, regardless of what it does or
+  does not contain. Second, the fixed file set only protected the exact
+  filenames `package.json`/`tsconfig.json`/`vitest.config.ts`, but `npm
+  install` resolves dependencies through `package-lock.json`,
+  `npm-shrinkwrap.json`, or `yarn.lock` when present, and Vitest/Vite both
+  recognize several config/workspace filename variants and extensions
+  (`vitest.config`/`vitest.workspace`/`vitest.projects`/`vite.config`, each
+  in `.ts`/`.mts`/`.cts`/`.js`/`.mjs`/`.cjs`) capable of changing which tests
+  run or how - none of which the fixed list matched.
+  `GOVERNANCE_DECISION_PATH_FILES` now also lists the lock/shrinkwrap
+  inputs, and `GOVERNANCE_DECISION_PATH_CONFIG_PATTERN` matches every
+  supported extension of those four config/workspace basenames, so adding a
+  previously-unlisted variant (e.g. `vitest.workspace.ts`, which this
+  repository does not currently use) can no longer evade the check.
+
   A same-name/path run whose workflow file does not match, whose content
   could not be read on either side, whose decision-path diff could not be
-  read, or which touches any governance decision-path file, is reported as
-  `"untrusted"` instead of `"success"`, and `supervisor-policy.mjs` treats
-  `"untrusted"` exactly like `"failure"`: it can never reach the merge-ready
-  branch, regardless of the run's own conclusion or of any owner ACCEPTED
-  verdict recorded at that same head.
+  read or is too large to be trusted as complete, or which touches any
+  governance decision-path file (fixed file, `scripts/`/`test/` directory,
+  or recognized config/workspace variant), is reported as `"untrusted"`
+  instead of `"success"`, and `supervisor-policy.mjs` treats `"untrusted"`
+  exactly like `"failure"`: it can never reach the merge-ready branch,
+  regardless of the run's own conclusion or of any owner ACCEPTED verdict
+  recorded at that same head.
 
   **Trust boundary.** Ordinary application code under `src/`, documentation,
   and project state/fixtures are deliberately *not* part of the governance
   decision path, so an ordinary code change unrelated to
   governance/typecheck/test enforcement still reaches a trusted `"success"`
-  conclusion when the workflow file is untouched and the run is genuinely
-  green - otherwise no pull request could ever become merge-ready
-  automatically. This means a change to `scripts/` or `test/` content that
-  is itself legitimate (e.g. this remediation cycle's own new regression
-  tests) is *also* reported `"untrusted"`, the same as a malicious change
-  would be - the automated check cannot distinguish the two, by design, and
-  intentionally falls back to requiring a human owner's exact-head review
-  and explicit `ACCEPTED` verdict for any pull request that touches the
-  decision path, rather than attempting a permissive but judgment-based
-  classification it cannot deterministically get right. GitHub's compare API
-  caps the returned file list at 300 changed files per pull request; a pull
-  request larger than that would have any files beyond the cap silently
-  excluded from `changedFilePaths` (`scripts/run-autonomy-supervisor.mjs`
-  documents this bound alongside `fetchChangedFilePaths`).
+  conclusion when the workflow file is untouched, the changed-file evidence
+  is complete, and the run is genuinely green - otherwise no pull request
+  could ever become merge-ready automatically. This means a change to
+  `scripts/` or `test/` content that is itself legitimate (e.g. this
+  remediation cycle's own new regression tests), or a pull request that
+  legitimately needs to touch 300 or more files, is *also* reported
+  `"untrusted"`, the same as a malicious change would be - the automated
+  check cannot distinguish the two, by design, and intentionally falls back
+  to requiring a human owner's exact-head review and explicit `ACCEPTED`
+  verdict for any pull request that touches the decision path or is too
+  large to prove complete, rather than attempting a permissive but
+  judgment-based classification it cannot deterministically get right.
 - `supervisor-provenance.mjs` - the single fail-closed
   `isUneditedProvenance` check used everywhere a **comment** body is trusted
   as evidence (owner-verdict conversation comments, dispatch markers): both
