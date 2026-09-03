@@ -14,6 +14,9 @@ on:
     types: [submitted, edited, dismissed]
   issue_comment:
     types: [created, edited]
+  workflow_run:
+    workflows: ["Project governance", "Claude Code"]
+    types: [completed]
 
 concurrency:
   group: autonomy-wake-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
@@ -39,6 +42,4 @@ jobs:
           node-version: 22
 
       - name: Decide whether to wake the supervisor
-        env:
-          AUTONOMY_TRUSTED_BOT_LOGINS: ${{ vars.AUTONOMY_TRUSTED_BOT_LOGINS }}
         run: node scripts/run-autonomy-wake.mjs
