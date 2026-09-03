@@ -72,6 +72,47 @@ describe("classifyOwnerCommentBody", () => {
     expect(classifyOwnerCommentBody("This accepted design is nice, but no head reference here.")).toBeNull();
   });
 
+  it("never classifies a negated or qualified non-acceptance phrase as ACCEPTED", () => {
+    expect(classifyOwnerCommentBody(`NOT ACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+    expect(classifyOwnerCommentBody(`UNACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+    expect(classifyOwnerCommentBody(`NOT YET ACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+    expect(classifyOwnerCommentBody(`NEVER ACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+    expect(classifyOwnerCommentBody(`NON-ACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+    expect(classifyOwnerCommentBody(`UN-ACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+  });
+
+  it("returns null for incidental prose that mentions 'accepted' without being a standalone marker line", () => {
+    expect(
+      classifyOwnerCommentBody(`The status is now ACCEPTED — exact head ${HEAD_A} after review.`),
+    ).toBeNull();
+    expect(
+      classifyOwnerCommentBody(`DE-0010 remediation cycle 2/3 complete. ACCEPTED — exact head ${HEAD_A}`),
+    ).toBeNull();
+  });
+
+  it("recognizes a valid exact standalone ACCEPTED marker line even amid other prose lines", () => {
+    expect(
+      classifyOwnerCommentBody(`DE-0010 remediation cycle 2/3 complete.\n\nACCEPTED — exact head ${HEAD_A}`),
+    ).toEqual({ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: HEAD_A });
+  });
+
+  it("recognizes an ACCEPTED marker line wrapped in harmless Markdown decoration", () => {
+    expect(classifyOwnerCommentBody(`**ACCEPTED — exact head \`${HEAD_A}\`**`)).toEqual({
+      kind: OWNER_VERDICT_KINDS.ACCEPTED,
+      headSha: HEAD_A,
+    });
+    expect(classifyOwnerCommentBody(`> ACCEPTED — exact head ${HEAD_A}`)).toEqual({
+      kind: OWNER_VERDICT_KINDS.ACCEPTED,
+      headSha: HEAD_A,
+    });
+  });
+
+  it("resolves combined blocking evidence safely when an ACCEPTED line and a later blocking marker line both exist", () => {
+    expect(
+      classifyOwnerCommentBody(`ACCEPTED — exact head ${HEAD_A}\n\nREJECTED — exact head ${HEAD_A}`),
+    ).toEqual({ kind: OWNER_VERDICT_KINDS.REJECTED, headSha: HEAD_A });
+  });
+
   it("returns null for a missing or non-string body", () => {
     expect(classifyOwnerCommentBody(undefined)).toBeNull();
     expect(classifyOwnerCommentBody(null)).toBeNull();
@@ -283,7 +324,7 @@ describe("buildOwnerVerdictEvents", () => {
     expect(events).toEqual([]);
   });
 
-  it("does not let incidental remediation prose steal a real ACCEPTED clause's head reference", () => {
+  it("does not credit an ACCEPTED clause sharing a single line with remediation prose - only a standalone marker line counts", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       comments: [
@@ -295,7 +336,55 @@ describe("buildOwnerVerdictEvents", () => {
         },
       ],
     });
+    expect(events).toEqual([]);
+  });
+
+  it("still recognizes a standalone ACCEPTED marker line even when remediation prose appears on an earlier line of the same comment", () => {
+    const events = buildOwnerVerdictEvents({
+      ownerLogin: OWNER,
+      comments: [
+        {
+          authorLogin: OWNER,
+          body: `DE-0010 remediation cycle 2/3 complete.\n\nACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
+      ],
+    });
     expect(events).toEqual([{ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: HEAD_A, submittedAt: "2026-09-02T09:00:00Z" }]);
+  });
+
+  it("never classifies negated/qualified non-acceptance phrasing as ACCEPTED, including phrasings beyond the two originally patched", () => {
+    const events = buildOwnerVerdictEvents({
+      ownerLogin: OWNER,
+      comments: [
+        {
+          authorLogin: OWNER,
+          body: `NOT YET ACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
+        {
+          authorLogin: OWNER,
+          body: `NEVER ACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T09:01:00Z",
+          updatedAt: "2026-09-02T09:01:00Z",
+        },
+        {
+          authorLogin: OWNER,
+          body: `NON-ACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T09:02:00Z",
+          updatedAt: "2026-09-02T09:02:00Z",
+        },
+        {
+          authorLogin: OWNER,
+          body: `UN-ACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T09:03:00Z",
+          updatedAt: "2026-09-02T09:03:00Z",
+        },
+      ],
+    });
+    expect(events).toEqual([]);
   });
 });
 
