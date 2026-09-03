@@ -1,3 +1,5 @@
+import { isUneditedProvenance } from "./supervisor-provenance.mjs";
+
 const STATE_ID_PATTERN = /^[0-9a-f]{7,64}$/;
 const SUBJECT_TYPES = new Set(["pull_request", "issue"]);
 const REASON_PATTERN = /^[a-z][a-z0-9_]*$/;
@@ -93,12 +95,21 @@ export function isTrustedDispatchMarkerAuthor(
  * Parses only the trusted-author subset of a comment list into dispatch
  * markers, silently discarding any comment from an untrusted author -
  * including one whose body would otherwise parse as a well-formed marker.
- * `comments` is `{ body, author: { login, type } }[]`.
+ * `comments` is `{ body, author: { login, type }, createdAt, updatedAt }[]`.
+ *
+ * Security redesign (owner-authorized): trusting a marker purely by author
+ * identity is not enough - GitHub lets a comment be edited after posting
+ * while its reported author stays unchanged, so a marker comment's body
+ * could in principle be rewritten after the supervisor posted it. A marker
+ * is only ever trusted when its `createdAt`/`updatedAt` are present,
+ * parseable, and exactly equal (see isUneditedProvenance); a missing or
+ * differing timestamp fails closed exactly like an untrusted author.
  */
 export function filterTrustedDispatchMarkers(comments, trustedAuthor = {}) {
   const markers = [];
   for (const comment of comments ?? []) {
     if (!isTrustedDispatchMarkerAuthor(comment?.author, trustedAuthor)) continue;
+    if (!isUneditedProvenance({ createdAt: comment?.createdAt, updatedAt: comment?.updatedAt })) continue;
     const marker = parseDispatchMarker(comment?.body);
     if (marker !== null) markers.push(marker);
   }

@@ -54,7 +54,8 @@ function createFakeGitHub({ dispatch } = {}) {
         return filterTrustedDispatchMarkers(commentsFor(number));
       },
       async postDispatchMarker(_subjectType, number, markerBody) {
-        commentsFor(number).push({ body: markerBody, author: BOT_AUTHOR });
+        const timestamp = now.toISOString();
+        commentsFor(number).push({ body: markerBody, author: BOT_AUTHOR, createdAt: timestamp, updatedAt: timestamp });
       },
       async addLabel(_subjectType, number, label) {
         labelsFor(number).add(label);

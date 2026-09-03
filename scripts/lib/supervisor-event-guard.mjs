@@ -1,15 +1,26 @@
 import { AUTONOMY_READY_LABEL } from "./supervisor-policy.mjs";
 
 /**
- * Pure gate deciding whether one native GitHub Actions webhook invocation
- * should proceed to a full supervisor evaluation cycle. This is the
- * event-driven entry path's guard: it runs before any credential is read or
- * any dispatch is attempted, so an irrelevant, out-of-repository, or
- * self/bot-generated event never reaches decision logic at all.
+ * Pure gate used by BOTH of DE-0010's split workflows:
  *
- * The scheduled five-minute tick and `workflow_dispatch` always proceed - the
- * event-driven path is an additive fast path, never a replacement for the
- * recovery backstop.
+ * - the unprivileged `autonomy-wake.yml` workflow calls this for
+ *   `pull_request`/`pull_request_review`/`issue_comment` events, deciding
+ *   whether to complete successfully (which is what wakes the secret-bearing
+ *   supervisor via `workflow_run`) - it never reads a credential and never
+ *   checks out or executes PR-controlled code either way;
+ * - the secret-bearing `autonomy-supervisor.yml` workflow calls this for
+ *   `schedule`/`workflow_dispatch`/`workflow_run` (of the wake workflow's
+ *   completion) before reading any credential or dispatching anything.
+ *
+ * Security redesign (owner-authorized): the secret-bearing supervisor no
+ * longer listens to `pull_request`/`pull_request_review`/`issue_comment`
+ * directly - GitHub loads a workflow's *definition* from the event's own
+ * ref for those trigger types, meaning a same-repository pull request could
+ * rewrite the secret-bearing workflow's steps before its trusted-checkout
+ * step even runs. `schedule`, `workflow_dispatch`, and `workflow_run` are
+ * always loaded from the default branch, which is what keeps the
+ * secret-bearing workflow's own *definition* untouchable by PR content. See
+ * docs/automation/autonomy-supervisor.md for the full rationale.
  */
 
 const RELEVANT_PULL_REQUEST_ACTIONS = new Set([
@@ -25,9 +36,17 @@ const RELEVANT_REVIEW_ACTIONS = new Set(["submitted", "edited", "dismissed"]);
 
 const RELEVANT_COMMENT_ACTIONS = new Set(["created", "edited"]);
 
-/** Governance/Claude workflow names whose completion is relevant to
- * supervision. Any other workflow_run is ignored before any dispatch. */
-const SUPERVISED_WORKFLOW_RUN_NAMES = new Set(["Project governance", "Claude Code"]);
+/** The fixed, reviewed unprivileged wake workflow whose completion wakes the
+ * secret-bearing supervisor. Only this workflow's completion is relevant;
+ * any other workflow_run (including this repository's own governance/Claude
+ * workflows, and the supervisor's own prior runs) is ignored before any
+ * dispatch. Matched by both name (readable) and path (immutable - see the
+ * identical rationale for GOVERNANCE_WORKFLOW_PATH in supervisor-ci.mjs): a
+ * same-repository pull request could otherwise add a second workflow file
+ * elsewhere in .github/workflows/ named identically and completing
+ * trivially, forging a wake trigger. */
+export const WAKE_WORKFLOW_NAME = "Autonomy wake";
+export const WAKE_WORKFLOW_PATH = ".github/workflows/autonomy-wake.yml";
 
 /** Matches the supervisor's own actor identity and any Claude-implementer
  * identity, so the supervisor never reacts to its own dispatch-marker
@@ -79,6 +98,8 @@ export function shouldHandleEvent({
   isPullRequestComment = false,
   labels = [],
   workflowName,
+  workflowPath,
+  workflowRunConclusion,
   trustedBotLogins = [],
 } = {}) {
   if (eventName === "schedule" || eventName === "workflow_dispatch") {
@@ -141,8 +162,11 @@ export function shouldHandleEvent({
       if (action !== "completed") {
         return { handle: false, reason: "irrelevant_workflow_run_action" };
       }
-      if (!SUPERVISED_WORKFLOW_RUN_NAMES.has(workflowName)) {
+      if (workflowName !== WAKE_WORKFLOW_NAME || workflowPath !== WAKE_WORKFLOW_PATH) {
         return { handle: false, reason: "unsupervised_workflow" };
+      }
+      if (workflowRunConclusion !== "success") {
+        return { handle: false, reason: "workflow_run_not_successful" };
       }
       return { handle: true, reason: "workflow_run_event" };
 

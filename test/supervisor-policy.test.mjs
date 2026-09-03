@@ -4,6 +4,7 @@ import {
   AUTONOMY_BLOCKED_REASON,
   AUTONOMY_READY_LABEL,
   MAX_DISPATCH_ATTEMPTS_PER_KEY,
+  MAX_REMEDIATION_CYCLES_PER_SUBJECT,
   REASONS,
   RETRY_INTERVAL_MS,
   computeIssueStateFingerprint,
@@ -355,6 +356,78 @@ describe("evaluatePullRequestAction: bounded retries span equivalent remediation
   });
 });
 
+describe("evaluatePullRequestAction: security redesign item 8 - packet-wide remediation-cycle ceiling", () => {
+  const HEAD_C = "c".repeat(40);
+  const HEAD_D = "d".repeat(40);
+  const failingChecksAt = (headSha) => ({ headSha, conclusion: "failure" });
+
+  function remediationDispatchAt(headSha, reason, secondsAgo) {
+    return {
+      key: buildIdempotencyKey({ subjectType: "pull_request", subjectNumber: 26, stateId: headSha, reason }),
+      dispatchedAt: new Date(NOW.getTime() - secondsAgo * 1000).toISOString(),
+    };
+  }
+
+  it("holds a brand-new fourth head immediately once three distinct heads have already gone through remediation, even with zero attempts at the new head", () => {
+    const dispatches = [
+      remediationDispatchAt(HEAD_A, REASONS.CI_FAILED, 14400),
+      remediationDispatchAt(HEAD_B, REASONS.REVIEW_MISSING, 10800),
+      remediationDispatchAt(HEAD_C, REASONS.REVIEW_REJECTED, 7200),
+    ];
+    const decision = evaluatePullRequestAction(pr({ headSha: HEAD_D, checks: failingChecksAt(HEAD_D) }), NOW, dispatches);
+    expect(decision.action).toBe("blocked");
+    expect(decision.reason).toBe(AUTONOMY_BLOCKED_REASON);
+  });
+
+  it("does not hold a new head when fewer than three distinct heads have gone through remediation", () => {
+    const dispatches = [
+      remediationDispatchAt(HEAD_A, REASONS.CI_FAILED, 14400),
+      remediationDispatchAt(HEAD_B, REASONS.REVIEW_MISSING, 10800),
+    ];
+    const decision = evaluatePullRequestAction(pr({ headSha: HEAD_C, checks: failingChecksAt(HEAD_C) }), NOW, dispatches);
+    expect(decision.action).toBe("dispatch");
+  });
+
+  it("keeps retrying under the ordinary per-head cap at a head that is already one of the three spent remediation heads, instead of blocking it immediately", () => {
+    const dispatches = [
+      remediationDispatchAt(HEAD_A, REASONS.CI_FAILED, 14400),
+      remediationDispatchAt(HEAD_B, REASONS.REVIEW_MISSING, 10800),
+      remediationDispatchAt(HEAD_C, REASONS.REVIEW_REJECTED, 7200),
+    ];
+    // HEAD_C already has exactly one remediation dispatch recorded (below
+    // MAX_DISPATCH_ATTEMPTS_PER_KEY), and is already counted among the three
+    // spent heads - a fresh evaluation at HEAD_C itself must still be
+    // allowed to retry under its own per-head budget, not be treated as a
+    // "new" fourth head.
+    const decision = evaluatePullRequestAction(pr({ headSha: HEAD_C, checks: failingChecksAt(HEAD_C) }), NOW, dispatches);
+    expect(decision.action).toBe("dispatch");
+  });
+
+  it("retry-attempt accounting (MAX_DISPATCH_ATTEMPTS_PER_KEY) and remediation-cycle accounting (MAX_REMEDIATION_CYCLES_PER_SUBJECT) are independent knobs", () => {
+    expect(MAX_REMEDIATION_CYCLES_PER_SUBJECT).toBe(3);
+    expect(MAX_DISPATCH_ATTEMPTS_PER_KEY).toBe(3);
+  });
+
+  it("merge_ready dispatch at a brand-new head is never blocked by the packet-wide remediation ceiling", () => {
+    const dispatches = [
+      remediationDispatchAt(HEAD_A, REASONS.CI_FAILED, 14400),
+      remediationDispatchAt(HEAD_B, REASONS.REVIEW_MISSING, 10800),
+      remediationDispatchAt(HEAD_C, REASONS.REVIEW_REJECTED, 7200),
+    ];
+    const decision = evaluatePullRequestAction(
+      pr({
+        headSha: HEAD_D,
+        checks: { headSha: HEAD_D, conclusion: "success" },
+        ownerVerdictEvents: [verdict(OWNER_VERDICT_KINDS.ACCEPTED, HEAD_D, "2026-09-02T08:00:00Z")],
+      }),
+      NOW,
+      dispatches,
+    );
+    expect(decision.action).toBe("dispatch");
+    expect(decision.reason).toBe(REASONS.MERGE_READY);
+  });
+});
+
 describe("isRetryDue", () => {
   it("is due when there is no prior dispatch", () => {
     expect(isRetryDue(NOW, null)).toBe(true);
@@ -435,14 +508,18 @@ describe("evaluateIssueAction: queued-task eligibility", () => {
 });
 
 describe("selectQueuedTasks: deterministic ordering and bounded selection", () => {
-  it("selects only eligible issues in ascending issue-number order, bounded by limit", () => {
+  it("selects only the lowest-numbered eligible issue, even when limit would allow more and a later issue is also eligible", () => {
+    // Security redesign item 7: even with a generous limit, a second
+    // eligible, later-numbered issue (30) must never be selected alongside
+    // the front of the queue (10) - only one queued packet may be started
+    // per cycle, in ascending order, so work never overlaps.
     const items = [
       { issue: { number: 30, labels: [AUTONOMY_READY_LABEL] }, dispatches: [] },
       { issue: { number: 10, labels: [AUTONOMY_READY_LABEL] }, dispatches: [] },
       { issue: { number: 20, labels: [] }, dispatches: [] },
     ];
     const selected = selectQueuedTasks(items, NOW, { limit: 5 });
-    expect(selected.map((entry) => entry.issue.number)).toEqual([10, 30]);
+    expect(selected.map((entry) => entry.issue.number)).toEqual([10]);
   });
 
   it("respects the limit", () => {
@@ -490,12 +567,44 @@ describe("selectQueuedTasks: deterministic ordering and bounded selection", () =
     expect(selected[0].decision).toEqual({ action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey: key });
   });
 
-  it("still skips past a bare skip decision (not opted in, or retry not due) to find eligible work", () => {
+  it("still skips past an issue that is not autonomy-ready (not part of the queue at all) to find the queue's front", () => {
     const items = [
       { issue: { number: 1, labels: [] }, dispatches: [] }, // not_autonomy_ready
       { issue: { number: 2, labels: [AUTONOMY_READY_LABEL] }, dispatches: [] }, // dispatch
     ];
     const selected = selectQueuedTasks(items, NOW, { limit: 5 });
     expect(selected.map((entry) => entry.issue.number)).toEqual([2]);
+  });
+
+  it("security redesign item 7: a front-of-queue issue in its retry cooldown blocks a later, otherwise-dispatchable issue from starting this cycle", () => {
+    const frontIssue = { number: 10, labels: [AUTONOMY_READY_LABEL], title: "t", body: "b" };
+    const key = buildIdempotencyKey({
+      subjectType: "issue",
+      subjectNumber: 10,
+      stateId: computeIssueStateFingerprint(frontIssue),
+      reason: REASONS.QUEUED_TASK_START,
+    });
+    const items = [
+      // The front issue (10) was just dispatched a moment ago and is well
+      // within RETRY_INTERVAL_MS, so its own decision is a "retry_not_due"
+      // skip - but it must still occupy this cycle's one selection slot.
+      { issue: frontIssue, dispatches: [{ key, dispatchedAt: NOW.toISOString() }] },
+      { issue: { number: 30, labels: [AUTONOMY_READY_LABEL], title: "t2", body: "b2" }, dispatches: [] },
+    ];
+    const selected = selectQueuedTasks(items, NOW, { limit: 5 });
+    expect(selected).toHaveLength(1);
+    expect(selected[0].issue.number).toBe(10);
+    expect(selected[0].decision.action).toBe("skip");
+    expect(selected[0].decision.reason).toBe("retry_not_due");
+  });
+
+  it("security redesign item 7: a front-of-queue issue that is held blocks a later, otherwise-dispatchable issue from starting this cycle", () => {
+    const items = [
+      { issue: { number: 10, labels: [AUTONOMY_READY_LABEL, "security-review"] }, dispatches: [] },
+      { issue: { number: 30, labels: [AUTONOMY_READY_LABEL] }, dispatches: [] },
+    ];
+    const selected = selectQueuedTasks(items, NOW, { limit: 5 });
+    expect(selected.map((entry) => entry.issue.number)).toEqual([10]);
+    expect(selected[0].decision.action).toBe("hold");
   });
 });

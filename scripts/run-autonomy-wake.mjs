@@ -1,0 +1,47 @@
+import { readGithubEvent, parseTrustedBotLogins } from "./lib/read-github-event.mjs";
+import { shouldHandleEvent } from "./lib/supervisor-event-guard.mjs";
+
+/**
+ * Entry point for the unprivileged "Autonomy wake" workflow
+ * (.github/workflows/autonomy-wake.yml). This script exists ONLY to decide
+ * whether an incoming pull_request/pull_request_review/issue_comment event
+ * is worth waking the secret-bearing "Autonomous supervisor" workflow for -
+ * it never reads or holds CHATGPT_WORKSPACE_AGENT_ID/TOKEN, never calls the
+ * GitHub API, and never checks out or executes anything beyond this trusted
+ * default-branch script itself.
+ *
+ * The event payload (GITHUB_EVENT_PATH) is repository-controlled data - a
+ * PR's title, an issue comment's body, a sender login - but it is only ever
+ * parsed as JSON and inspected as plain data by shouldHandleEvent's field
+ * comparisons; nothing here interpolates any of it into a shell command,
+ * `eval`, or file path.
+ *
+ * Success (exit 0) is the sole signal that wakes the supervisor, via its
+ * `workflow_run: types: [completed]` trigger, which additionally requires
+ * conclusion "success" (see shouldHandleEvent's workflow_run case). Failure
+ * (exit 1) for an irrelevant/self/bot/out-of-repository event is expected,
+ * routine behavior - not an operational problem to alert on.
+ */
+function main() {
+  const { eventName, payload, payloadAvailable } = readGithubEvent();
+  const repository = process.env.GITHUB_REPOSITORY ?? "";
+  const [owner, repo] = repository.split("/");
+
+  const decision = shouldHandleEvent({
+    eventName,
+    payloadAvailable,
+    action: payload?.action,
+    repositoryFullName: payload?.repository?.full_name,
+    expectedRepositoryFullName: owner && repo ? `${owner}/${repo}` : undefined,
+    senderLogin: payload?.sender?.login,
+    senderType: payload?.sender?.type,
+    isPullRequestComment: Boolean(payload?.issue?.pull_request),
+    labels: (payload?.issue?.labels ?? []).map((label) => (typeof label === "string" ? label : label.name)),
+    trustedBotLogins: parseTrustedBotLogins(process.env.AUTONOMY_TRUSTED_BOT_LOGINS),
+  });
+
+  console.log(`autonomy wake: ${decision.handle ? "waking the supervisor" : "skipping"} (${decision.reason})`);
+  process.exitCode = decision.handle ? 0 : 1;
+}
+
+main();

@@ -1,6 +1,30 @@
 import { AUTONOMY_BLOCKED_LABEL, evaluatePullRequestAction, selectQueuedTasks } from "./supervisor-policy.mjs";
 import { DISPATCH_OUTCOMES, formatDispatchMarker } from "./supervisor-idempotency.mjs";
 
+/** Maximum number of attempts to post the dispatch marker after a dispatch
+ * attempt (success or failure) before giving up for this cycle. See the
+ * "security redesign item 13" note on applyDecision below for why this
+ * exists and why it is still not a complete guarantee on its own. */
+const MARKER_POST_MAX_ATTEMPTS = 3;
+
+/**
+ * Posts the dispatch marker, retrying a transient failure (e.g. a GitHub API
+ * 5xx or secondary rate limit) up to MARKER_POST_MAX_ATTEMPTS times before
+ * giving up. Never throws; the caller distinguishes success from exhausted
+ * retries via the returned `{ ok }`.
+ */
+async function postDispatchMarkerWithRetries(deps, subjectType, number, marker) {
+  for (let attempt = 1; attempt <= MARKER_POST_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await deps.postDispatchMarker(subjectType, number, marker);
+      return { ok: true };
+    } catch {
+      if (attempt === MARKER_POST_MAX_ATTEMPTS) return { ok: false };
+    }
+  }
+  return { ok: false };
+}
+
 /**
  * Applies one already-computed decision: dispatches to the Workspace Agent
  * and records a trusted dispatch marker for every attempted dispatch -
@@ -20,6 +44,24 @@ import { DISPATCH_OUTCOMES, formatDispatchMarker } from "./supervisor-idempotenc
  * (MAX_DISPATCH_ATTEMPTS_PER_KEY), both of which count every marker
  * regardless of its outcome. A marker recording the outcome (never a
  * credential) is now posted for every attempted dispatch.
+ *
+ * Security redesign (owner-authorized), item 13: even with the above fix,
+ * a *successful* dispatch (a real side effect already sent to the
+ * Workspace Agent) followed by a marker-post that itself fails leaves no
+ * local evidence of that dispatch - the next cycle would see an empty
+ * dispatch history for this key and retry immediately, potentially sending
+ * a second real wake-up before RETRY_INTERVAL_MS has elapsed. The marker
+ * post is now retried up to MARKER_POST_MAX_ATTEMPTS times before giving
+ * up, and if it still fails, this returns the distinct terminal status
+ * `dispatch_marker_failed` (counted as an error by the wiring layer, so an
+ * operator is alerted) rather than the ambiguous `dispatched`. This does
+ * not by itself guarantee no duplicate real-world dispatch can ever happen
+ * in the residual all-retries-failed case; the deterministic
+ * `Idempotency-Key` sent on every dispatch attempt (unchanged for this
+ * exact state - see supervisor-dispatch.mjs) is the authoritative
+ * last-line defense the official Workspace Agent API itself provides
+ * against a genuine duplicate side effect, even when this local marker
+ * cannot be recorded at all.
  */
 async function applyDecision({ subjectType, number, headSha, decision, now, deps }) {
   if (decision.action === "blocked") {
@@ -52,7 +94,15 @@ async function applyDecision({ subjectType, number, headSha, decision, now, deps
     dispatchedAt: now.toISOString(),
     outcome: dispatchResult.ok ? DISPATCH_OUTCOMES.DISPATCHED : DISPATCH_OUTCOMES.FAILED,
   });
-  await deps.postDispatchMarker(subjectType, number, marker);
+  const markerResult = await postDispatchMarkerWithRetries(deps, subjectType, number, marker);
+
+  if (!markerResult.ok) {
+    return {
+      status: "dispatch_marker_failed",
+      reason: decision.reason,
+      idempotencyKey: decision.idempotencyKey,
+    };
+  }
 
   if (!dispatchResult.ok) {
     return { status: "dispatch_failed", reason: decision.reason, idempotencyKey: decision.idempotencyKey };

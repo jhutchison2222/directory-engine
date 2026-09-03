@@ -42,6 +42,18 @@ export const RETRY_INTERVAL_MS = 30 * 60 * 1000;
  */
 export const MAX_DISPATCH_ATTEMPTS_PER_KEY = 3;
 
+/** Maximum number of *distinct exact heads* a single pull request may cycle
+ * through remediation (REMEDIATION_REASONS) before the supervisor holds for
+ * the owner - the packet-wide ceiling issue #25 requires ("stop after three
+ * unsuccessful remediation cycles and escalate the blocker"), independent of
+ * MAX_DISPATCH_ATTEMPTS_PER_KEY (which only bounds retries *within* one
+ * exact head and resets on every new head). Deliberately a separate
+ * constant from MAX_DISPATCH_ATTEMPTS_PER_KEY, even though both currently
+ * equal 3, so retry-attempt accounting and remediation-cycle accounting can
+ * be changed independently in the future without silently affecting each
+ * other. */
+export const MAX_REMEDIATION_CYCLES_PER_SUBJECT = 3;
+
 export const AUTONOMY_BLOCKED_REASON = "autonomy_blocked";
 
 export const REASONS = Object.freeze({
@@ -100,6 +112,29 @@ function countRemediationDispatchesAtState(dispatches, subjectType, subjectNumbe
 
 function countDispatchesForKey(dispatches, key) {
   return (dispatches ?? []).filter((dispatch) => dispatch.key === key).length;
+}
+
+/**
+ * Collects the set of distinct exact-state ids (head SHAs, for a pull
+ * request) that have already had at least one remediation-reason dispatch
+ * recorded for this exact subject. This is what makes
+ * MAX_REMEDIATION_CYCLES_PER_SUBJECT a packet-wide ceiling that survives
+ * head changes, instead of resetting to a fresh budget on every push: a
+ * subject that has already cycled through remediation at N distinct heads
+ * has spent N of its remediation cycles, regardless of how many attempts
+ * happened within any single one of them.
+ */
+function collectRemediationHeads(dispatches, subjectType, subjectNumber) {
+  const heads = new Set();
+  for (const dispatch of dispatches ?? []) {
+    const parsed = parseIdempotencyKey(dispatch.key);
+    if (!parsed) continue;
+    if (parsed.subjectType !== subjectType) continue;
+    if (parsed.subjectNumber !== subjectNumber) continue;
+    if (!REMEDIATION_REASONS.has(parsed.reason)) continue;
+    heads.add(parsed.stateId);
+  }
+  return heads;
 }
 
 export function isRetryDue(now, lastDispatchedAtMs) {
@@ -177,12 +212,28 @@ export function evaluatePullRequestAction(pr, now, dispatches = []) {
     reason,
   });
 
-  if (
-    REMEDIATION_REASONS.has(reason) &&
-    countRemediationDispatchesAtState(dispatches, "pull_request", pr.number, pr.headSha) >=
+  if (REMEDIATION_REASONS.has(reason)) {
+    const remediationHeads = collectRemediationHeads(dispatches, "pull_request", pr.number);
+    const isNewRemediationHead = !remediationHeads.has(pr.headSha);
+
+    // Packet-wide ceiling (issue #25's "stop after three unsuccessful
+    // remediation cycles"): once MAX_REMEDIATION_CYCLES_PER_SUBJECT distinct
+    // heads have already gone through remediation, a *new* head is never
+    // granted a fresh per-head attempt budget - it is held for the owner
+    // immediately. A head that has already spent part of its own per-head
+    // budget (i.e. it is already counted among remediationHeads) is left to
+    // the ordinary per-head cap below, so retries already in flight at the
+    // current head are not abruptly cut off mid-cycle.
+    if (isNewRemediationHead && remediationHeads.size >= MAX_REMEDIATION_CYCLES_PER_SUBJECT) {
+      return { action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey };
+    }
+
+    if (
+      countRemediationDispatchesAtState(dispatches, "pull_request", pr.number, pr.headSha) >=
       MAX_DISPATCH_ATTEMPTS_PER_KEY
-  ) {
-    return { action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey };
+    ) {
+      return { action: "blocked", reason: AUTONOMY_BLOCKED_REASON, idempotencyKey };
+    }
   }
 
   if (!isRetryDue(now, mostRecentDispatchAt(dispatches, idempotencyKey))) {
@@ -238,14 +289,24 @@ export function evaluateIssueAction(issue, now, dispatches = []) {
  * exhausted its retry-attempt budget ("blocked") was silently discarded -
  * `applyDecision`'s blocked branch (which applies AUTONOMY_BLOCKED_LABEL) was
  * therefore unreachable for issues, unlike pull requests, which are always
- * evaluated and applied. This now returns the first `limit` issues, in
- * ascending order, whose decision is anything other than "skip" (a bare
- * `not_autonomy_ready` or `retry_not_due` decision has nothing to report and
- * is passed over so the next eligible issue can be considered) - including
- * "hold" and "blocked" - so a held or blocked issue is visible and, for
- * "blocked", actually receives its label. Because this still stops at
- * `limit`, a held/blocked issue at the front of the queue is reported instead
- * of silently skipped past to start a new task underneath it.
+ * evaluated and applied.
+ *
+ * DE-0010 security redesign (owner-authorized), item 7: a later version
+ * still passed over a bare `retry_not_due` skip decision to consider the
+ * next-lowest-numbered issue, which let a second, lower-priority issue start
+ * (and produce its own pull request) while the first-queued issue's own
+ * dispatch was merely in its retry cooldown - overlapping two work packets
+ * instead of finishing the first one before starting the next. The queue's
+ * *front* is now the first issue that carries the `autonomy-ready` opt-in
+ * label at all (`not_autonomy_ready` issues are not part of the queue and
+ * are still passed over while searching for that front) - once found, that
+ * issue's decision is always the one returned, whatever it is (`dispatch`,
+ * `hold`, `blocked`, or a `retry_not_due` skip): a later-numbered issue is
+ * never selected instead, even when the front issue itself has nothing
+ * actionable to do this cycle. This is what preserves first-queued-item
+ * precedence: only once the front issue's own decision is `dispatch` (and,
+ * eventually, produces an active pull request that itself takes precedence
+ * over the queue) does any work actually start.
  */
 export function selectQueuedTasks(itemsWithDispatches, now, { limit = 1 } = {}) {
   const decided = itemsWithDispatches
@@ -254,9 +315,13 @@ export function selectQueuedTasks(itemsWithDispatches, now, { limit = 1 } = {}) 
 
   const selected = [];
   for (const item of decided) {
-    if (item.decision.action === "skip") continue;
+    if (item.decision.action === "skip" && item.decision.reason === "not_autonomy_ready") continue;
+    // This is the front of the queue: precedence stops here regardless of
+    // whether it is actionable this cycle - a later-queued issue must never
+    // be selected while an earlier one hasn't yet produced an active pull
+    // request, to avoid starting overlapping work packets.
     selected.push(item);
-    if (selected.length >= limit) break;
+    break;
   }
-  return selected;
+  return selected.slice(0, limit);
 }

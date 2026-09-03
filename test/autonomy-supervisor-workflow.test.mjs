@@ -3,14 +3,19 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /**
- * DE-0010 item 8: these tests inspect the actual `.github/workflows/
- * autonomy-supervisor.yml` file text (there is no YAML-parsing dependency
- * in this repository, so structural assertions are string/regex-based
- * rather than parsed) and prove the properties that matter for a workflow
- * that ends up holding `secrets.CHATGPT_WORKSPACE_AGENT_TOKEN`: it checks
- * out the trusted default branch (never an untrusted PR head or merge
- * ref), grants only the authorized least-privilege permissions, and
- * invokes only the one reviewed runner script from that trusted checkout.
+ * DE-0010 security redesign (owner-authorized): these tests inspect the
+ * actual `.github/workflows/autonomy-supervisor.yml` file text (there is no
+ * YAML-parsing dependency in this repository, so structural assertions are
+ * string/regex-based rather than parsed) and prove the properties that
+ * matter for a workflow that ends up holding
+ * `secrets.CHATGPT_WORKSPACE_AGENT_TOKEN`: it is triggered only by event
+ * types whose *workflow definition* GitHub always loads from the default
+ * branch (schedule, workflow_dispatch, workflow_run) - never a type whose
+ * definition can be loaded from a pull request's own ref (pull_request,
+ * pull_request_review) - it checks out the trusted default branch (never
+ * an untrusted PR head or merge ref), grants only the authorized
+ * least-privilege permissions, and invokes only the one reviewed runner
+ * script from that trusted checkout.
  */
 const WORKFLOW_PATH = fileURLToPath(new URL("../.github/workflows/autonomy-supervisor.yml", import.meta.url));
 const workflow = readFileSync(WORKFLOW_PATH, "utf8");
@@ -34,11 +39,12 @@ describe("autonomy-supervisor.yml: trigger surface", () => {
     expect(workflow).toMatch(/workflow_dispatch:/);
   });
 
-  it("adds the guarded native event-driven entry paths", () => {
-    expect(workflow).toMatch(/^\s*pull_request:\s*$/m);
-    expect(workflow).toMatch(/^\s*pull_request_review:\s*$/m);
-    expect(workflow).toMatch(/^\s*issue_comment:\s*$/m);
+  it("is woken only via workflow_run of the unprivileged wake workflow, never directly by pull_request/pull_request_review/issue_comment", () => {
     expect(workflow).toMatch(/^\s*workflow_run:\s*$/m);
+    expect(workflow).toContain('workflows: ["Autonomy wake"]');
+    expect(workflow).not.toMatch(/^\s*pull_request:\s*$/m);
+    expect(workflow).not.toMatch(/^\s*pull_request_review:\s*$/m);
+    expect(workflow).not.toMatch(/^\s*issue_comment:\s*$/m);
   });
 
   it("never uses pull_request_target, which would run untrusted PR-head code with repository secrets", () => {
@@ -103,7 +109,7 @@ describe("autonomy-supervisor.yml: trusted default-branch checkout before secret
 
   it("the secret-bearing step is wired after the trusted checkout step, never before it", () => {
     const checkoutIndex = workflow.indexOf("uses: actions/checkout@");
-    const secretIndex = workflow.indexOf("CHATGPT_WORKSPACE_AGENT_TOKEN");
+    const secretIndex = workflow.indexOf("secrets.CHATGPT_WORKSPACE_AGENT_TOKEN");
     expect(checkoutIndex).toBeGreaterThan(-1);
     expect(secretIndex).toBeGreaterThan(checkoutIndex);
   });
@@ -113,5 +119,14 @@ describe("autonomy-supervisor.yml: credentials referenced by name only", () => {
   it("reads the agent id and token only from vars/secrets by name, never a literal value", () => {
     expect(workflow).toContain("${{ vars.CHATGPT_WORKSPACE_AGENT_ID }}");
     expect(workflow).toContain("${{ secrets.CHATGPT_WORKSPACE_AGENT_TOKEN }}");
+  });
+
+  it("security redesign item 6: exports the trusted-bot-login allowlist repository variable into the runtime", () => {
+    expect(workflow).toContain("${{ vars.AUTONOMY_TRUSTED_BOT_LOGINS }}");
+  });
+
+  it("never references a repository/environment secret other than the one authorized Workspace Agent token", () => {
+    const secretRefs = [...workflow.matchAll(/secrets\.([A-Za-z0-9_]+)/g)].map((match) => match[1]);
+    expect(new Set(secretRefs)).toEqual(new Set(["CHATGPT_WORKSPACE_AGENT_TOKEN"]));
   });
 });

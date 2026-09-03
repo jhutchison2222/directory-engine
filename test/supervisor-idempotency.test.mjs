@@ -95,7 +95,12 @@ describe("filterTrustedDispatchMarkers", () => {
 
   it("counts a marker only when authored by the trusted identity", () => {
     const markers = filterTrustedDispatchMarkers([
-      { body: trustedMarkerBody, author: { login: DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type: DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE } },
+      {
+        body: trustedMarkerBody,
+        author: { login: DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type: DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE },
+        createdAt: "2026-09-02T00:00:00Z",
+        updatedAt: "2026-09-02T00:00:00Z",
+      },
     ]);
     expect(markers).toEqual([{ key, dispatchedAt: "2026-09-02T00:00:00Z" }]);
   });
@@ -103,14 +108,47 @@ describe("filterTrustedDispatchMarkers", () => {
   it("discards an identical, well-formed marker forged by an untrusted commenter", () => {
     const forgedBody = formatDispatchMarker({ key, dispatchedAt: "2099-01-01T00:00:00Z" });
     const markers = filterTrustedDispatchMarkers([
-      { body: forgedBody, author: { login: "some-attacker", type: "User" } },
+      {
+        body: forgedBody,
+        author: { login: "some-attacker", type: "User" },
+        createdAt: "2026-09-02T00:00:00Z",
+        updatedAt: "2026-09-02T00:00:00Z",
+      },
     ]);
     expect(markers).toEqual([]);
   });
 
   it("discards a marker from a bot with the right login but wrong type", () => {
     const markers = filterTrustedDispatchMarkers([
-      { body: trustedMarkerBody, author: { login: DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type: "User" } },
+      {
+        body: trustedMarkerBody,
+        author: { login: DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type: "User" },
+        createdAt: "2026-09-02T00:00:00Z",
+        updatedAt: "2026-09-02T00:00:00Z",
+      },
+    ]);
+    expect(markers).toEqual([]);
+  });
+
+  it("discards a trusted-author marker that was edited after posting (createdAt !== updatedAt)", () => {
+    const markers = filterTrustedDispatchMarkers([
+      {
+        body: trustedMarkerBody,
+        author: { login: DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type: DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE },
+        createdAt: "2026-09-02T00:00:00Z",
+        updatedAt: "2026-09-02T00:05:00Z",
+      },
+    ]);
+    expect(markers).toEqual([]);
+  });
+
+  it("fails closed on a trusted-author marker missing updatedAt entirely", () => {
+    const markers = filterTrustedDispatchMarkers([
+      {
+        body: trustedMarkerBody,
+        author: { login: DEFAULT_TRUSTED_MARKER_AUTHOR_LOGIN, type: DEFAULT_TRUSTED_MARKER_AUTHOR_TYPE },
+        createdAt: "2026-09-02T00:00:00Z",
+      },
     ]);
     expect(markers).toEqual([]);
   });

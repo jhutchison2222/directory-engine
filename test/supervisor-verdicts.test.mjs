@@ -89,8 +89,18 @@ describe("buildOwnerVerdictEvents", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       comments: [
-        { authorLogin: "codex", body: `ACCEPTED — exact head ${HEAD_A}`, createdAt: "2026-09-02T09:00:00Z" },
-        { authorLogin: OWNER, body: `REJECTED — exact head ${HEAD_A}`, createdAt: "2026-09-02T10:00:00Z" },
+        {
+          authorLogin: "codex",
+          body: `ACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
+        {
+          authorLogin: OWNER,
+          body: `REJECTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T10:00:00Z",
+          updatedAt: "2026-09-02T10:00:00Z",
+        },
       ],
     });
     expect(events).toEqual([{ kind: OWNER_VERDICT_KINDS.REJECTED, headSha: HEAD_A, submittedAt: "2026-09-02T10:00:00Z" }]);
@@ -99,7 +109,14 @@ describe("buildOwnerVerdictEvents", () => {
   it("ignores an owner comment without an explicit marker", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
-      comments: [{ authorLogin: OWNER, body: "Sounds good, thanks!", createdAt: "2026-09-02T09:00:00Z" }],
+      comments: [
+        {
+          authorLogin: OWNER,
+          body: "Sounds good, thanks!",
+          createdAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
+      ],
     });
     expect(events).toEqual([]);
   });
@@ -108,17 +125,65 @@ describe("buildOwnerVerdictEvents", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       reviews: [
-        { authorLogin: OWNER, body: "", state: "APPROVED", headSha: HEAD_A, submittedAt: "2026-09-02T09:00:00Z" },
+        {
+          authorLogin: OWNER,
+          body: "",
+          state: "APPROVED",
+          headSha: HEAD_A,
+          submittedAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
       ],
     });
     expect(events).toEqual([{ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: HEAD_A, submittedAt: "2026-09-02T09:00:00Z" }]);
   });
 
-  it("ignores a non-independent owner formal review state (COMMENTED/DISMISSED/PENDING) with no explicit marker", () => {
+  it("ignores a non-independent owner formal review state (COMMENTED) with no explicit marker", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       reviews: [
-        { authorLogin: OWNER, body: "just a comment", state: "COMMENTED", headSha: HEAD_A, submittedAt: "2026-09-02T09:00:00Z" },
+        {
+          authorLogin: OWNER,
+          body: "just a comment",
+          state: "COMMENTED",
+          headSha: HEAD_A,
+          submittedAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
+      ],
+    });
+    expect(events).toEqual([]);
+  });
+
+  it("ignores a DISMISSED review's explicit marker text, not only its native state", () => {
+    const events = buildOwnerVerdictEvents({
+      ownerLogin: OWNER,
+      reviews: [
+        {
+          authorLogin: OWNER,
+          body: `ACCEPTED — exact head ${HEAD_A}`,
+          state: "DISMISSED",
+          headSha: HEAD_A,
+          submittedAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
+      ],
+    });
+    expect(events).toEqual([]);
+  });
+
+  it("ignores a PENDING review's explicit marker text, not only its native state", () => {
+    const events = buildOwnerVerdictEvents({
+      ownerLogin: OWNER,
+      reviews: [
+        {
+          authorLogin: OWNER,
+          body: `ACCEPTED — exact head ${HEAD_A}`,
+          state: "PENDING",
+          headSha: HEAD_A,
+          submittedAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
       ],
     });
     expect(events).toEqual([]);
@@ -134,6 +199,7 @@ describe("buildOwnerVerdictEvents", () => {
           state: "APPROVED",
           headSha: HEAD_A,
           submittedAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
         },
       ],
     });
@@ -144,10 +210,76 @@ describe("buildOwnerVerdictEvents", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       reviews: [
-        { authorLogin: "codex", body: "", state: "APPROVED", headSha: HEAD_A, submittedAt: "2026-09-02T09:00:00Z" },
+        {
+          authorLogin: "codex",
+          body: "",
+          state: "APPROVED",
+          headSha: HEAD_A,
+          submittedAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
       ],
     });
     expect(events).toEqual([]);
+  });
+
+  it("never trusts a comment whose updatedAt differs from createdAt (edited after posting)", () => {
+    const events = buildOwnerVerdictEvents({
+      ownerLogin: OWNER,
+      comments: [
+        {
+          authorLogin: OWNER,
+          body: `ACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:05:00Z",
+        },
+      ],
+    });
+    expect(events).toEqual([]);
+  });
+
+  it("fails closed on a comment missing updatedAt entirely", () => {
+    const events = buildOwnerVerdictEvents({
+      ownerLogin: OWNER,
+      comments: [{ authorLogin: OWNER, body: `ACCEPTED — exact head ${HEAD_A}`, createdAt: "2026-09-02T09:00:00Z" }],
+    });
+    expect(events).toEqual([]);
+  });
+
+  it("never classifies a negated ACCEPTED phrase as acceptance", () => {
+    const events = buildOwnerVerdictEvents({
+      ownerLogin: OWNER,
+      comments: [
+        {
+          authorLogin: OWNER,
+          body: `NOT ACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
+        {
+          authorLogin: OWNER,
+          body: `UNACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T09:01:00Z",
+          updatedAt: "2026-09-02T09:01:00Z",
+        },
+      ],
+    });
+    expect(events).toEqual([]);
+  });
+
+  it("does not let incidental remediation prose steal a real ACCEPTED clause's head reference", () => {
+    const events = buildOwnerVerdictEvents({
+      ownerLogin: OWNER,
+      comments: [
+        {
+          authorLogin: OWNER,
+          body: `DE-0010 remediation cycle 2/3 complete. ACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T09:00:00Z",
+          updatedAt: "2026-09-02T09:00:00Z",
+        },
+      ],
+    });
+    expect(events).toEqual([{ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: HEAD_A, submittedAt: "2026-09-02T09:00:00Z" }]);
   });
 });
 
@@ -177,11 +309,17 @@ describe("selectLatestOwnerVerdict: the PR #24 stale-verdict race", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       comments: [
-        { authorLogin: OWNER, body: `ACCEPTED — exact head ${HEAD_A}`, createdAt: "2026-09-02T19:00:00Z" },
+        {
+          authorLogin: OWNER,
+          body: `ACCEPTED — exact head ${HEAD_A}`,
+          createdAt: "2026-09-02T19:00:00Z",
+          updatedAt: "2026-09-02T19:00:00Z",
+        },
         {
           authorLogin: OWNER,
           body: `REJECTED — exact head ${HEAD_A}, remediation required before merge`,
           createdAt: "2026-09-02T20:17:59Z",
+          updatedAt: "2026-09-02T20:17:59Z",
         },
       ],
     });

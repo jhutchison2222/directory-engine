@@ -6,11 +6,70 @@ by DE-0010. It supplements, and does not weaken,
 
 ## Purpose
 
-The supervisor is a scheduled, manually-dispatchable, and event-driven GitHub
-Actions workflow that watches supervised pull requests and queued issues, and
-wakes the dedicated ChatGPT Workspace Agent when there is exact-head evidence
-that it should act. It never merges, deploys, or mutates repository content
-itself.
+The supervisor watches supervised pull requests and queued issues, and wakes
+the dedicated ChatGPT Workspace Agent when there is exact-head evidence that
+it should act. It never merges, deploys, or mutates repository content
+itself. It runs as **two separate GitHub Actions workflows** (see
+"Architecture: the workflow split" below) rather than one, for a security
+reason specific to how GitHub Actions loads workflow *definitions*.
+
+## Architecture: the workflow split
+
+An earlier single-workflow design triggered directly on `pull_request`,
+`pull_request_review`, `issue_comment`, `schedule`, `workflow_dispatch`, and
+`workflow_run`, and held `secrets.CHATGPT_WORKSPACE_AGENT_TOKEN` throughout.
+An exact-head security review rejected that design: GitHub Actions loads a
+workflow's own **YAML definition** from the git ref associated with the
+triggering event. For `pull_request` and `pull_request_review`, that ref is
+the pull request's own head - so a same-repository pull request could, in
+principle, rewrite the secret-bearing workflow's own steps (for example,
+inserting a step that echoes an environment variable) *before* its
+trusted-checkout step ever ran, regardless of what that checkout step itself
+pinned to. Pinning `actions/checkout`'s `ref:` to the default branch protects
+what code the job *executes*, but not what the job's *own YAML* says to do in
+the first place - that is a strictly earlier point in the execution model
+that a `ref:` override cannot reach back and fix.
+
+`schedule`, `workflow_dispatch`, and `workflow_run`, by contrast, are not
+associated with a pull request ref at all (or, per GitHub's documented
+behavior, `workflow_run`-triggered workflows are only ever loaded from the
+repository's default branch) - so a workflow triggered *only* by these three
+event types has a definition that is always the reviewed, merged version.
+
+The supervisor is therefore split into two workflows:
+
+- **`.github/workflows/autonomy-wake.yml`** ("Autonomy wake") - unprivileged.
+  Triggered directly by `pull_request`, `pull_request_review`, and
+  `issue_comment`. Holds `permissions: contents: read` only, no
+  `CHATGPT_WORKSPACE_AGENT_ID`/`CHATGPT_WORKSPACE_AGENT_TOKEN`, and no other
+  secret. It checks out the repository's **default branch** (never the PR
+  head or merge ref, regardless of what triggered it) and runs exactly one
+  script, `scripts/run-autonomy-wake.mjs`, which makes no GitHub API calls,
+  treats the event payload purely as parsed JSON data (never executed,
+  sourced, or interpolated into a shell command), and exits `0` (success) or
+  `1` (irrelevant/self/bot-generated/out-of-repository event) via the same
+  tested `shouldHandleEvent` gate the supervisor itself uses. Even though a
+  malicious PR could rewrite *this* workflow's own definition too (it is
+  triggered by `pull_request`/`pull_request_review`), doing so gains an
+  attacker nothing: there is no credential to steal, and its only observable
+  effect either way is whether it exits 0 or 1.
+- **`.github/workflows/autonomy-supervisor.yml`** ("Autonomous supervisor") -
+  secret-bearing. Triggered only by `schedule` (the five-minute recovery
+  backstop), `workflow_dispatch` (manual), and `workflow_run: workflows:
+  ["Autonomy wake"], types: [completed]` (the immediate-wake fast path,
+  additionally required to have `conclusion: success` - see
+  `supervisor-event-guard.mjs`). Its own definition is therefore always
+  loaded from the default branch, and it holds the Workspace Agent
+  credential.
+
+Both workflows check out the repository's default branch with
+`persist-credentials: false` and never reference
+`github.event.pull_request.head.sha`, a `refs/pull/...` ref, or
+`github.event.pull_request.merge_commit_sha`; neither uses
+`pull_request_target`. `test/autonomy-wake-workflow.test.mjs` and
+`test/autonomy-supervisor-workflow.test.mjs` inspect the committed workflow
+file text directly to prove both of these properties, plus that no secret
+reference of any kind appears in the wake workflow.
 
 ## Scope
 
@@ -20,51 +79,67 @@ itself.
 - Never acts on a subject labeled `security-review` or `major-decision` -
   it reports the hold and stops, requiring a human decision.
 - Never acts on a subject the supervisor itself has already labeled
-  `autonomy-blocked` after exhausting the remediation-cycle attempt budget
-  (`MAX_DISPATCH_ATTEMPTS_PER_KEY`, 3) for the same exact head (or, for
-  issues, exact content) - a new head (or new content) is required before it
-  will try again.
+  `autonomy-blocked` after exhausting a retry/remediation budget (see
+  "Bounded retries and the remediation-cycle attempt cap" below) - a new
+  head (or new content) is required before it will try again, unless the
+  packet-wide remediation-cycle ceiling has also been reached (see below),
+  in which case a human decision is required regardless of head.
 - Never merges directly. Only the Workspace Agent, re-reading fresh evidence
   under the owner's standing code-only authorization, may merge - with
   expected-head protection and a merge commit.
 
 ## Entry paths
 
-- **Scheduled recovery backstop** - every five minutes (`*/5 * * * *`),
-  unconditionally.
-- **Manual dispatch** - `workflow_dispatch`, unconditionally.
-- **Event-driven fast path** - native GitHub Actions webhook triggers for:
+- **Scheduled recovery backstop** - every five minutes (`*/5 * * * *`) on the
+  secret-bearing supervisor workflow, unconditionally.
+- **Manual dispatch** - `workflow_dispatch` on the secret-bearing supervisor
+  workflow, unconditionally.
+- **Event-driven fast path** - the unprivileged wake workflow reacts directly
+  to:
   - `pull_request`: `opened`, `reopened`, `synchronize`, `ready_for_review`,
     `converted_to_draft`, `closed`
   - `pull_request_review`: `submitted`, `edited`, `dismissed`
   - `issue_comment`: `created`, `edited`, limited to comments on pull
     requests or on `autonomy-ready`-labeled issues
-  - `workflow_run`: `completed`, limited to the named governance/Claude
-    workflows this supervisor actually depends on for evidence
 
-  Every guarded event is checked by the pure `shouldHandleEvent` gate in
-  `scripts/lib/supervisor-event-guard.mjs` before any credential is read or
-  any dispatch is attempted: a missing or unreadable event payload fails
-  closed immediately (only the schedule/manual paths may proceed without
-  one), then repository match, actor (never a Claude-associated actor, and
-  never a generic bot actor - preventing recursion against the supervisor's
-  own comments/labels - unless the sender is on an explicit, injectable
-  trusted-bot-login allowlist supplied from a fixed reviewed configuration
-  or verified environment, never issue/PR content; `github-actions[bot]` can
-  never be on that allowlist regardless of configuration), the event's own
-  action filter, the comment-scope filter, and the workflow-name filter. All
-  triggers - schedule, manual, and event-driven - share one non-overlapping
-  concurrency group and compute the identical deterministic idempotency key
-  for identical state, so no combination of them can duplicate a dispatch.
+  and, if `shouldHandleEvent` (in `scripts/lib/supervisor-event-guard.mjs`,
+  shared by both workflows' scripts) decides the event is relevant, exits
+  successfully - which wakes the secret-bearing supervisor via its
+  `workflow_run` trigger. A missing or unreadable event payload fails closed
+  immediately (only the schedule/manual paths may proceed without one), then
+  repository match, actor (never a Claude-associated actor, and never a
+  generic bot actor - preventing recursion against the supervisor's own
+  comments/labels - unless the sender is on an explicit, injectable
+  trusted-bot-login allowlist supplied from the `AUTONOMY_TRUSTED_BOT_LOGINS`
+  repository variable, never issue/PR content; `github-actions[bot]` can
+  never be on that allowlist regardless of configuration), and the event's
+  own action/comment-scope filter. The secret-bearing supervisor's own
+  `workflow_run` handling separately requires the completing run to match
+  the wake workflow's fixed name *and* path (`WAKE_WORKFLOW_NAME`/
+  `WAKE_WORKFLOW_PATH` in `supervisor-event-guard.mjs`) and have
+  `conclusion: success` - a same-named forged workflow elsewhere in
+  `.github/workflows/`, or a wake run that itself decided to skip, can never
+  wake the supervisor.
+
+  All triggers - schedule, manual, and event-driven - share one
+  non-overlapping concurrency group on the supervisor workflow and compute
+  the identical deterministic idempotency key for identical state, so no
+  combination of them can duplicate a dispatch.
 
   This is an additive fast path only; the five-minute schedule remains the
-  recovery backstop regardless of webhook delivery.
+  recovery backstop regardless of webhook delivery or the wake workflow's
+  own availability.
 
   No public webhook receiver, external relay, Cloudflare Worker, or new
   credential is introduced. Every trigger is a native GitHub Actions webhook
   event on this repository.
 
 ## Workflow permissions
+
+`.github/workflows/autonomy-wake.yml` requests exactly:
+
+- `contents: read` - to check out the repository (the default branch only;
+  no write path, no other permission of any kind).
 
 `.github/workflows/autonomy-supervisor.yml` requests exactly:
 
@@ -81,15 +156,9 @@ itself.
 - `pull-requests: write` - to post dispatch-bookkeeping comments on pull
   requests.
 
-It does not request `contents: write`, any deployment, environment, packages,
-administration, or security-events permission, and it never uses one it was
-not granted. Because the job holds `secrets.CHATGPT_WORKSPACE_AGENT_TOKEN`,
-every trigger - including event-driven ones carrying an untrusted pull
-request's metadata - checks out only the repository's trusted default branch
-(`ref: ${{ github.event.repository.default_branch }}`, with
-`persist-credentials: false`), never a pull request head SHA or merge ref;
-`test/autonomy-supervisor-workflow.test.mjs` inspects the committed workflow
-file text directly to prove this.
+Neither workflow requests `contents: write`, any deployment, environment,
+packages, administration, or security-events permission, and neither ever
+uses one it was not granted.
 
 ## Decision model
 
@@ -97,40 +166,65 @@ All decision logic lives in pure, dependency-injected, fully-tested modules
 under `scripts/lib/`:
 
 - `supervisor-policy.mjs` - exact-head/exact-state evaluation for pull
-  requests and issues, hold labels, the bounded remediation-cycle retry-
-  attempt cap, retry timing, and queued-task selection (`selectQueuedTasks`
-  surfaces the first eligible queued issue's decision - including `hold` and
-  `blocked`, not only `dispatch` - so a held or retry-exhausted issue is
-  visible and, once blocked, actually receives `autonomy-blocked` instead of
-  being silently passed over).
+  requests and issues, hold labels, the bounded per-head retry-attempt cap
+  and the separate packet-wide remediation-cycle ceiling, retry timing, and
+  queued-task selection (`selectQueuedTasks` surfaces the front-of-queue
+  issue's decision even when it is `hold`, `blocked`, or a bare
+  `retry_not_due` skip, not only `dispatch` - a later-numbered issue is never
+  selected instead, so overlapping work packets cannot start while the front
+  of the queue is mid-cycle).
 - `supervisor-verdicts.mjs` - owner-only exact-head acceptance chronology:
   classifying owner-authored comments/reviews into ACCEPTED / REJECTED /
   SUPERSEDED / REMEDIATION_REQUESTED verdicts and resolving the
   chronologically latest one at an exact head (the PR #24 stale-verdict race
-  guard).
+  guard). Verdict markers are structurally anchored (`NOT ACCEPTED` and
+  `UNACCEPTED` never classify as ACCEPTED; incidental remediation-flavored
+  prose ahead of a real `ACCEPTED` clause can never steal that clause's head
+  reference), `DISMISSED`/`PENDING` reviews are excluded before their body is
+  even inspected for a marker, and a comment or review is only ever trusted
+  when its creation/update provenance is valid and unedited (see
+  `supervisor-provenance.mjs`).
 - `supervisor-ci.mjs` - governance CI evidence: requires a completed,
-  successful GitHub Actions **workflow run** literally named `Project
-  governance` at the exact head; nothing else (an unrelated green check, a
-  job-level check-run name such as this repository's own governance job
-  `verify`, this repository's own pre-merge-inoperable `Autonomous
-  supervisor` job, or a stale-head run) ever counts.
+  successful GitHub Actions **workflow run** matching both the fixed name
+  (`Project governance`) and the fixed, reviewed file path
+  (`.github/workflows/project-governance.yml`) at the exact head; nothing
+  else (an unrelated green check, a job-level check-run name such as this
+  repository's own governance job `verify`, a same-named workflow run at a
+  *different* path, this repository's own pre-merge-inoperable
+  `Autonomous supervisor`/`Autonomy wake` jobs, or a stale-head run) ever
+  counts. Matching by path in addition to name is what stops a
+  same-repository pull request from forging acceptance by adding a second
+  workflow file elsewhere in `.github/workflows/` with an identical
+  human-readable `name:`.
+- `supervisor-provenance.mjs` - the single fail-closed
+  `isUneditedProvenance` check used everywhere a comment/review body is
+  trusted as evidence (owner verdicts, dispatch markers): both
+  `createdAt`/`updatedAt` must be present, parseable, and exactly equal, or
+  the body is not trusted - a missing timestamp is never treated as "safe by
+  default".
 - `supervisor-idempotency.mjs` - deterministic idempotency keys, the hidden
   HTML-comment dispatch marker used as the duplicate-suppression ledger (the
   workflow has no `contents: write`, so it cannot persist a ledger file; it
-  reads its own prior marker comments instead), and trusted-marker-author
-  filtering.
-- `supervisor-event-guard.mjs` - the pure gate deciding whether one
-  event-driven webhook invocation should proceed to a full evaluation cycle,
-  including the missing/unreadable-payload fail-closed check.
+  reads its own prior marker comments instead), trusted-marker-author
+  filtering, and the same edited-comment provenance check as owner verdicts.
+- `supervisor-event-guard.mjs` - the pure gate, shared by both workflows'
+  entry scripts, deciding whether one event-driven invocation should proceed,
+  including the missing/unreadable-payload fail-closed check and (for the
+  supervisor's own `workflow_run` case) the wake workflow's fixed
+  name/path/conclusion checks.
 - `supervisor-dispatch.mjs` - the fixed Workspace Agent trigger request
   against the official API contract, agent-id validation, the bounded
   non-secret dispatch instruction, and fail-closed credential handling.
 - `supervisor-run.mjs` - the orchestrator tying the above together with
-  per-item failure isolation and active-pull-request precedence.
+  per-item failure isolation, active-pull-request precedence, and retried
+  dispatch-marker posting (see "Bounded retries" below).
 
-`scripts/run-autonomy-supervisor.mjs` is the thin, intentionally simple
-GitHub REST wiring the workflow invokes; it contains no decision logic and is
-not itself unit tested, only its pure dependencies are.
+`scripts/run-autonomy-supervisor.mjs` and `scripts/run-autonomy-wake.mjs` are
+the thin, intentionally simple wiring each workflow invokes; neither contains
+decision logic and neither is itself unit tested, only their pure
+dependencies are. `scripts/lib/read-github-event.mjs` is the shared,
+untested-by-design helper both use to read and parse the local event payload
+file.
 
 ### Exact-head/exact-state evidence only
 
@@ -145,16 +239,10 @@ of one yet - is always reported as `awaiting_ci`, never mistaken for an
 
 ### Owner-only exact-head acceptance chronology (the PR #24 stale-verdict race)
 
-A prior version of this supervisor trusted a hardcoded allowlist of guessed
-third-party reviewer logins (a dedicated Codex reviewer, the Workspace
-Agent). This work packet's available tool access could never independently
-confirm those literal logins, so the allowlist was a standing risk of either
-failing closed forever or, if guessed wrong, accepting nobody's review as
-authoritative. The only trusted acceptance identity is now the **repository
-owner login**, supplied by the wiring layer from repository metadata (the
-`owner` segment of the `GITHUB_REPOSITORY` environment variable GitHub
-Actions always sets) - never guessed, hardcoded, or read from issue/PR
-content.
+The only trusted acceptance identity is the **repository owner login**,
+supplied by the wiring layer from repository metadata (the `owner` segment
+of the `GITHUB_REPOSITORY` environment variable GitHub Actions always sets) -
+never guessed, hardcoded, or read from issue/PR content.
 
 `supervisor-verdicts.mjs` merges owner-authored pull-request conversation
 comments with owner-authored formal PR reviews into a single chronological
@@ -162,13 +250,20 @@ verdict timeline (`buildOwnerVerdictEvents`). A conversation comment only
 counts when it carries an explicit marker: `ACCEPTED — exact head <sha>`,
 `REJECTED — exact head <sha>`, `SUPERSEDED ... exact head <sha>`, or a
 remediation request tied to an exact head (recognizing the owner's own
-real-world phrasing, e.g. "Remediate DE-0010 at exact head `<sha>`"). A
-formal review counts via an explicit marker in its body, or - lacking one -
-via its own native GitHub verdict (`APPROVED` -> accepted,
-`CHANGES_REQUESTED` -> rejected); any other native review state
-(`COMMENTED`, `DISMISSED`, `PENDING`) without an explicit marker is not
-evidence and is silently ignored, so a non-actionable follow-up review can
-never overwrite an earlier real verdict.
+real-world phrasing, e.g. "Remediate DE-0010 at exact head `<sha>`") -
+`NOT ACCEPTED`/`UNACCEPTED` phrasing never matches the ACCEPTED marker, and a
+remediation-flavored word appearing ahead of a real `ACCEPTED` clause can
+never consume that clause's own head reference (the marker's bounded
+lookahead cannot cross another marker keyword). A formal review is first
+excluded entirely if its native state is `DISMISSED` or `PENDING` - even if
+its body carries what looks like an explicit marker - and otherwise counts
+via an explicit marker in its body, or - lacking one - via its own native
+GitHub verdict (`APPROVED` -> accepted, `CHANGES_REQUESTED` -> rejected);
+`COMMENTED` without an explicit marker is not evidence. Every comment/review
+considered here must also pass `isUneditedProvenance` - an edited comment
+(GitHub preserves the original author on an edit, so author identity alone
+is not proof the body is still what the owner wrote) is never trusted,
+regardless of the identity that appears to have authored it.
 
 `selectLatestOwnerVerdict` picks the chronologically latest event (by
 timestamp) among those recorded at the pull request's exact current head.
@@ -179,57 +274,94 @@ accepted verdict and a later rejection both existed for the same head. The
 later evidence always wins and blocks `merge_ready` dispatch until a new
 accepted head is produced.
 
-### Bounded retries and the remediation-cycle attempt cap
+### Bounded retries, the remediation-cycle attempt cap, and the packet-wide ceiling
 
 Each dispatch reason is keyed by `subjectType:subjectNumber:stateId:reason`.
 The supervisor never dispatches the same key twice within the retry interval
 (30 minutes), and a change in `stateId` (new head SHA, or new issue content)
 always produces a new key regardless of any prior dispatch history at the old
-state. The remediation-cycle attempt budget
-(`MAX_DISPATCH_ATTEMPTS_PER_KEY`, 3) is counted **across every equivalent
-remediation reason** (`ci_failed`, `review_missing`, `review_rejected`)
-combined for the same exact head, not separately per reason wording - a
-subject that bounces between a failing check and a rejected review at the
-same head still exhausts the budget after three dispatches total. Once
-exhausted, the next evaluation blocks instead of retrying again and applies
-the supervisor-owned `autonomy-blocked` label; from the next cycle onward
-that label is itself treated as a hold, so the subject is reported and
-skipped until a new exact-state key exists. `merge_ready` dispatch is
-deliberately excluded from this shared cap: it is governed independently by
-its own idempotency key and the same 30-minute retry interval only, so a
-merge-ready subject is never blocked by remediation-cycle exhaustion.
+state.
+
+Two independent budgets bound remediation (`ci_failed`, `review_missing`,
+`review_rejected`) dispatches for a pull request:
+
+- **Per-head attempt cap** (`MAX_DISPATCH_ATTEMPTS_PER_KEY`, 3) - counted
+  across every equivalent remediation reason combined for the *same exact
+  head*, not separately per reason wording. A subject that bounces between a
+  failing check and a rejected review at the same head still exhausts this
+  budget after three dispatches total at that head.
+- **Packet-wide remediation-cycle ceiling**
+  (`MAX_REMEDIATION_CYCLES_PER_SUBJECT`, 3) - counted across *distinct heads*
+  that have each had at least one remediation dispatch, for the whole life
+  of the pull request. Once three distinct heads have each gone through
+  remediation, a brand-new fourth head is held for the owner immediately -
+  with zero attempts spent at that new head - rather than being granted a
+  fresh per-head budget. This is issue #25's "stop after three unsuccessful
+  remediation cycles and escalate the blocker" made packet-wide: pushing a
+  new commit no longer resets the clock. A head that is already among the
+  counted heads (i.e. remediation already started at that exact head) is
+  still governed by the ordinary per-head cap above, so retries already
+  under way at the current head are not abruptly cut off mid-cycle.
+
+These two budgets are deliberately separate constants (even though both
+currently equal 3) so retry-attempt accounting and remediation-cycle
+accounting can be changed independently without silently affecting each
+other. Once either is exhausted, the next evaluation blocks instead of
+retrying again and applies the supervisor-owned `autonomy-blocked` label;
+from the next cycle onward that label is itself treated as a hold, so the
+subject is reported and skipped until a human clears it. `merge_ready`
+dispatch is deliberately excluded from both budgets: it is governed
+independently by its own idempotency key and the same 30-minute retry
+interval only, so a merge-ready subject - including one reached at a brand
+new head after the packet-wide ceiling was hit - is never blocked by
+remediation-cycle exhaustion.
 
 A dispatch marker is posted for **every** attempted dispatch, not only a
 successful one: a non-`202` response or a thrown error (e.g. the dispatch
 endpoint refusing a redirect, or a network failure) is recorded with outcome
 `failed` (see `DISPATCH_OUTCOMES` in `supervisor-idempotency.mjs`) and counts
-toward both the 30-minute retry interval and the remediation attempt budget
-exactly like a successful dispatch. A prior version only recorded a
-successful dispatch, so a persistently failing endpoint was retried on every
-five-minute tick forever, with no spacing and no cap.
+toward both the 30-minute retry interval and the remediation attempt budgets
+exactly like a successful dispatch.
 
-For queued issues, `selectQueuedTasks` surfaces the first eligible issue's
-decision even when it is `hold` or `blocked`, not only `dispatch` - a prior
-version filtered to `dispatch` before the caller ever saw the result, so an
-issue that had exhausted its attempt budget never reached the code path that
-applies `autonomy-blocked`, unlike pull requests (which are always evaluated
-and applied). Because at most one queued issue is surfaced per cycle, a
-held or blocked issue at the front of the ascending-number queue is reported
-instead of silently passed over to start a new task underneath it.
+**Marker-post retries.** Posting the dispatch marker after a dispatch attempt
+is itself retried up to three times (`supervisor-run.mjs`) before giving up,
+because a successful dispatch (a real side effect already sent to the
+Workspace Agent) followed by a marker-post failure would otherwise leave no
+local evidence of that dispatch at all - the next cycle would see an empty
+history for that key and could retry immediately, before `RETRY_INTERVAL_MS`
+has elapsed. If every retry still fails, the cycle reports the distinct
+terminal status `dispatch_marker_failed` (treated as an error by the wiring
+layer, surfacing as a failed Actions run rather than a silent success) so an
+operator is alerted, instead of the ambiguous `dispatched`. This reduces, but
+does not by itself eliminate, the residual risk in the all-retries-failed
+case; the deterministic `Idempotency-Key` sent on every dispatch attempt
+(unchanged for a given exact state) is the authoritative last-line defense
+the official Workspace Agent API itself provides against a genuine duplicate
+side effect even when this local marker cannot be recorded at all.
+
+For queued issues, `selectQueuedTasks` always surfaces the front of the
+queue - the lowest-numbered issue that carries the `autonomy-ready` label at
+all - whatever its decision is (`dispatch`, `hold`, `blocked`, or a bare
+`retry_not_due` skip). A later-numbered, otherwise-dispatchable issue is
+never selected instead: only once the front issue's own decision is
+`dispatch` (and it eventually produces an active pull request, which itself
+takes precedence over the queue) does any new work actually start. This is
+what prevents two queued packets from overlapping - a prior version passed
+over a front issue that was merely in its retry cooldown to consider the
+next-lowest-numbered issue, letting a second packet start before the first
+had finished.
 
 ### Trusted dispatch-marker authorship
 
-A prior version parsed a dispatch marker out of *any* issue/PR comment with
-no author check. Because the marker format (subject type, number, head SHA,
-reason string) is entirely public, any commenter could forge one with a
-future `dispatchedAt` and silence the supervisor for that subject
-indefinitely. `filterTrustedDispatchMarkers` in `supervisor-idempotency.mjs`
-now counts a marker only when the comment is authored by the exact trusted
-identity (`github-actions[bot]`, type `Bot`) the supervisor itself posts as;
-an identical, well-formed marker forged by any other author is discarded. A
-marker is posted for every attempted dispatch (see "Bounded retries" above),
-tagged with an `outcome` of `dispatched` or `failed`; `outcome` is optional
-on parse so a marker posted before this field existed still round-trips.
+`filterTrustedDispatchMarkers` in `supervisor-idempotency.mjs` counts a
+marker only when the comment is authored by the exact trusted identity
+(`github-actions[bot]`, type `Bot`) the supervisor itself posts as, **and**
+passes the same `isUneditedProvenance` check used for owner verdicts - an
+identical, well-formed marker forged by any other author, or a
+trusted-author marker edited after posting, is discarded. A marker is posted
+for every attempted dispatch (see "Bounded retries" above), tagged with an
+`outcome` of `dispatched` or `failed`; `outcome` is optional on parse so a
+marker posted before this field existed still round-trips.
 
 ### Active-pull-request precedence
 
@@ -247,9 +379,10 @@ the remaining subjects in the same cycle.
 
 ## Credential handling
 
-- The workflow reads only `vars.CHATGPT_WORKSPACE_AGENT_ID` and
+- The supervisor workflow reads only `vars.CHATGPT_WORKSPACE_AGENT_ID` and
   `secrets.CHATGPT_WORKSPACE_AGENT_TOKEN`, by name, and fails closed
-  (`requireEnv`) if either is missing or empty.
+  (`requireEnv`) if either is missing or empty. The wake workflow never
+  references either, or any other secret.
 - `validateAgentId` rejects an agent id that does not match the official
   `agtch_...` channel-id format (bounded `[A-Za-z0-9_-]` suffix, matching the
   official example's use of underscores) before any network call.
@@ -297,6 +430,37 @@ review of PR #26):
 - Success is exactly HTTP `202 Accepted`; any other non-redirect status is
   treated as a failed (but not thrown) dispatch.
 
+## Pre-merge vs. post-merge acceptance evidence, and rollback
+
+The `workflow_run` chain that wakes the secret-bearing supervisor cannot
+become active until `autonomy-wake.yml` and `autonomy-supervisor.yml` are
+both present on the repository's default branch - GitHub only recognizes a
+`workflow_run` relationship between workflows that already exist there.
+**Pre-merge acceptance can therefore only ever cover**: exact-head Project
+governance (install/typecheck/test/governance-validator), the structural and
+security-boundary tests described throughout this document, the harmless
+in-memory fixture proof (below), and Codex/owner exact-head review of the
+code, tests, and workflow file text. It cannot cover a real `202 Accepted`
+Workspace Agent response, a real `workflow_run` hand-off between the two
+live workflows, or any other post-merge-only behavior - claiming otherwise
+before merge would misrepresent what was actually verified.
+
+**The one live harmless dispatch proof happens immediately after a guarded
+merge**, once both workflows are live on the default branch, and must itself
+fail closed without exposing any credential value: if the Workspace Agent
+repository variable/secret are not both configured, `requireEnv` throws
+before any network call, and the run fails visibly (not silently) with no
+credential ever printed, logged, or persisted. If that post-merge proof
+fails for any other reason (e.g. the Workspace Agent endpoint rejects the
+request, or the `workflow_run` hand-off does not fire as expected),
+**rollback/disable is a revert of the two workflow files** (not a code
+revert) - since neither workflow performs any repository mutation beyond
+posting bookkeeping comments/labels via `issues: write`/`pull-requests:
+write`, disabling them by reverting the workflow files (or, for an
+immediate stop without a revert, disabling the workflows from the repository
+Actions settings) fully and immediately stops all supervision with no
+partial or inconsistent state left behind.
+
 ## Open items
 
 - **Live prerequisites remain unverified.** The dedicated Workspace Agent's
@@ -305,33 +469,27 @@ review of PR #26):
   configuration in this repository has not been independently verified by
   this work packet, and no live dispatch has been attempted. Do not treat
   the harmless in-memory proof below as evidence of a real `202 Accepted`
-  response or of fresh live-agent behavior; that requires a separate,
-  explicitly authorized live verification step.
-- **Supervised `workflow_run` names are provisional.** `SUPERVISED_WORKFLOW_RUN_NAMES`
-  in `supervisor-event-guard.mjs` lists `"Project governance"` and
-  `"Claude Code"` as placeholders for the governance/Claude workflow names
-  this supervisor depends on; confirm these match the actual `name:` fields
-  once the workflow is live. (`"Project governance"` is confirmed correct
-  against this repository's actual `.github/workflows/project-governance.yml`
-  `name:` field; `"Claude Code"` remains unconfirmed.)
-- **The trusted-bot-login allowlist is unset by default.** `shouldHandleEvent`
-  now accepts an injectable `trustedBotLogins` allowlist so a specifically
-  trusted reviewer/agent identity (e.g. a GitHub App-backed Workspace Agent,
-  which posts as sender type `Bot`) can trigger the event-driven fast path
-  without weakening the generic bot-recursion guard. The wiring reads it from
-  the optional, comma-separated `AUTONOMY_TRUSTED_BOT_LOGINS` environment
-  variable, which is not yet set anywhere - until the dedicated Workspace Agent's literal GitHub
-  login is independently confirmed, no bot identity beyond the hardcoded
-  `github-actions[bot]` exclusion is trusted, and the event-driven path falls
-  back to the five-minute schedule for that evidence, exactly as before this
-  change.
-- **Bootstrap:** `.github/workflows/autonomy-supervisor.yml` itself cannot
-  successfully invoke `scripts/run-autonomy-supervisor.mjs` against `main`
-  until this pull request merges (the script does not exist on `main` yet).
-  A pre-merge failure of the workflow's own `Autonomous supervisor` job is
-  therefore expected and is never Project governance evidence -
-  `supervisor-ci.mjs` only ever considers runs literally named `Project
-  governance`, so this cannot affect the acceptance calculation either way.
+  response or of fresh live-agent behavior; that requires the separate,
+  explicitly authorized post-merge live verification step described above.
+- **The trusted-bot-login allowlist is wired but unconfigured by default.**
+  Both workflows now export the optional `AUTONOMY_TRUSTED_BOT_LOGINS`
+  repository variable into the environment their scripts read
+  (`vars.AUTONOMY_TRUSTED_BOT_LOGINS`), so a specifically trusted
+  reviewer/agent identity (e.g. a GitHub App-backed Workspace Agent, which
+  posts as sender type `Bot`) can trigger the event-driven fast path without
+  weakening the generic bot-recursion guard, once an owner independently
+  confirms the Workspace Agent's literal GitHub login and sets that
+  variable. Until then, the variable remains unset, no bot identity beyond
+  the hardcoded `github-actions[bot]` exclusion is trusted, and the
+  event-driven path falls back to the five-minute schedule for that
+  evidence, exactly as before this change.
+- **Bootstrap:** neither workflow can successfully invoke its script against
+  `main` until this pull request merges (neither script, nor
+  `autonomy-wake.yml` itself, exists on `main` yet). A pre-merge failure of
+  either workflow's own job is therefore expected and is never Project
+  governance evidence - `supervisor-ci.mjs` only ever considers runs
+  matching both the fixed name *and* path of `project-governance.yml`, so
+  this cannot affect the acceptance calculation either way.
 
 ## Harmless proof
 
@@ -346,5 +504,10 @@ queued issue receiving `autonomy-blocked` the same way a pull request does,
 simultaneous schedule/event-driven dedupe, forged dispatch-marker rejection,
 per-item failure isolation, and duplicate suppression - entirely in memory,
 with a fake GitHub store and a call-counting fake Workspace Agent dispatcher.
-It performs no network access and touches no live system or credential, and
-it is not a substitute for the live verification called out above.
+`test/autonomy-wake-workflow.test.mjs` and
+`test/autonomy-supervisor-workflow.test.mjs` separately prove the two
+workflow files' own trigger/permission/checkout/credential-isolation
+properties by inspecting their committed text. None of this touches a live
+system, calls the real GitHub API, performs a real `workflow_run` hand-off
+between the two live workflows, or is a substitute for the post-merge live
+verification called out above.

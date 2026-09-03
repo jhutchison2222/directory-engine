@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldHandleEvent } from "../scripts/lib/supervisor-event-guard.mjs";
+import { WAKE_WORKFLOW_NAME, WAKE_WORKFLOW_PATH, shouldHandleEvent } from "../scripts/lib/supervisor-event-guard.mjs";
 import { AUTONOMY_READY_LABEL } from "../scripts/lib/supervisor-policy.mjs";
 
 const REPO = "jhutchison2222/directory-engine";
@@ -114,7 +114,9 @@ describe("shouldHandleEvent: self/bot recursion prevention", () => {
       expectedRepositoryFullName: REPO,
       senderLogin: "github-actions[bot]",
       senderType: "Bot",
-      workflowName: "Project governance",
+      workflowName: WAKE_WORKFLOW_NAME,
+      workflowPath: WAKE_WORKFLOW_PATH,
+      workflowRunConclusion: "success",
     });
     expect(decision).toEqual({ handle: true, reason: "workflow_run_event" });
   });
@@ -281,25 +283,57 @@ describe("shouldHandleEvent: workflow_run", () => {
     senderLogin: "github-actions[bot]",
     senderType: "Bot",
   };
+  const wake = { workflowName: WAKE_WORKFLOW_NAME, workflowPath: WAKE_WORKFLOW_PATH };
 
-  it("handles completion of a supervised governance workflow", () => {
-    expect(shouldHandleEvent({ ...base, action: "completed", workflowName: "Project governance" })).toEqual({
+  it("handles a successful completion of the wake workflow", () => {
+    expect(shouldHandleEvent({ ...base, ...wake, action: "completed", workflowRunConclusion: "success" })).toEqual({
       handle: true,
       reason: "workflow_run_event",
     });
   });
 
   it("skips an unsupervised workflow's completion", () => {
-    expect(shouldHandleEvent({ ...base, action: "completed", workflowName: "Some Unrelated Workflow" })).toEqual({
-      handle: false,
-      reason: "unsupervised_workflow",
-    });
+    expect(
+      shouldHandleEvent({
+        ...base,
+        action: "completed",
+        workflowName: "Some Unrelated Workflow",
+        workflowPath: ".github/workflows/some-unrelated.yml",
+        workflowRunConclusion: "success",
+      }),
+    ).toEqual({ handle: false, reason: "unsupervised_workflow" });
+  });
+
+  it("security redesign item 9 regression: skips a run with the wake workflow's name but a forged path", () => {
+    expect(
+      shouldHandleEvent({
+        ...base,
+        action: "completed",
+        workflowName: WAKE_WORKFLOW_NAME,
+        workflowPath: ".github/workflows/forged.yml",
+        workflowRunConclusion: "success",
+      }),
+    ).toEqual({ handle: false, reason: "unsupervised_workflow" });
   });
 
   it("skips a non-completed workflow_run action", () => {
-    expect(shouldHandleEvent({ ...base, action: "requested", workflowName: "Project governance" })).toEqual({
+    expect(shouldHandleEvent({ ...base, ...wake, action: "requested", workflowRunConclusion: "success" })).toEqual({
       handle: false,
       reason: "irrelevant_workflow_run_action",
+    });
+  });
+
+  it("skips a completed wake run whose conclusion was not success (e.g. an irrelevant event the wake guard correctly rejected)", () => {
+    expect(shouldHandleEvent({ ...base, ...wake, action: "completed", workflowRunConclusion: "failure" })).toEqual({
+      handle: false,
+      reason: "workflow_run_not_successful",
+    });
+  });
+
+  it("fails closed when the wake run's conclusion is missing entirely", () => {
+    expect(shouldHandleEvent({ ...base, ...wake, action: "completed" })).toEqual({
+      handle: false,
+      reason: "workflow_run_not_successful",
     });
   });
 });
