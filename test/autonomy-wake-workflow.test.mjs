@@ -85,9 +85,19 @@ describe("autonomy-wake.yml: trigger surface", () => {
     expect(workflow).toMatch(/^\s*issue_comment:\s*$/m);
   });
 
-  it("never itself schedules or accepts workflow_run/workflow_dispatch - it is the trigger source, not the recovery backstop", () => {
+  it("reacts to workflow_run completion of exactly Project governance and Claude Code - the immediate check/implementation-completion handoff", () => {
+    expect(workflow).toMatch(/^\s*workflow_run:\s*$/m);
+    expect(workflow).toContain('workflows: ["Project governance", "Claude Code"]');
+    expect(workflow).toMatch(/workflow_run:[\s\S]*?types: \[completed\]/);
+  });
+
+  it("never itself schedules or accepts workflow_dispatch - it is a trigger source, not the recovery backstop", () => {
     expect(workflow).not.toMatch(/^\s*schedule:\s*$/m);
-    expect(workflow).not.toMatch(/^\s*workflow_run:\s*$/m);
     expect(workflow).not.toMatch(/^\s*workflow_dispatch:\s*$/m);
+  });
+
+  it("never lists itself or the secret-bearing supervisor as a workflow_run source, preventing a recursive wake chain", () => {
+    expect(workflow).not.toMatch(/workflow_run:[\s\S]*?Autonomy wake/);
+    expect(workflow).not.toMatch(/workflow_run:[\s\S]*?Autonomous supervisor/);
   });
 });

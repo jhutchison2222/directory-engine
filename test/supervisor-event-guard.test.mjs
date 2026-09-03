@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   TRUSTED_BOT_LOGINS,
+  WAKE_SOURCE_WORKFLOWS,
   WAKE_WORKFLOW_NAME,
   WAKE_WORKFLOW_PATH,
   isExplicitlyTrustedBotLogin,
+  isWakeSourceWorkflowRun,
   shouldHandleEvent,
+  shouldWakeForSourceWorkflowRun,
 } from "../scripts/lib/supervisor-event-guard.mjs";
 import { AUTONOMY_READY_LABEL } from "../scripts/lib/supervisor-policy.mjs";
 
@@ -342,5 +345,128 @@ describe("shouldHandleEvent: unrecognized event names fail closed", () => {
         senderType: "User",
       }),
     ).toEqual({ handle: false, reason: "unrecognized_event" });
+  });
+});
+
+describe("WAKE_SOURCE_WORKFLOWS / isWakeSourceWorkflowRun: fixed name+path identities for the immediate check/implementation-completion handoff", () => {
+  it("lists exactly Project governance and Claude Code, matched by both name and path", () => {
+    expect(WAKE_SOURCE_WORKFLOWS).toEqual([
+      { name: "Project governance", path: ".github/workflows/project-governance.yml" },
+      { name: "Claude Code", path: ".github/workflows/claude.yml" },
+    ]);
+    expect(Object.isFrozen(WAKE_SOURCE_WORKFLOWS)).toBe(true);
+  });
+
+  it("matches a fixed source workflow's exact name/path pair", () => {
+    expect(isWakeSourceWorkflowRun("Project governance", ".github/workflows/project-governance.yml")).toBe(true);
+    expect(isWakeSourceWorkflowRun("Claude Code", ".github/workflows/claude.yml")).toBe(true);
+  });
+
+  it("security regression: rejects a forged run with a trusted name but a different path", () => {
+    expect(isWakeSourceWorkflowRun("Project governance", ".github/workflows/forged-governance.yml")).toBe(false);
+    expect(isWakeSourceWorkflowRun("Claude Code", ".github/workflows/forged-claude.yml")).toBe(false);
+  });
+
+  it("rejects a trusted path with a mismatched name, and any unrelated workflow", () => {
+    expect(isWakeSourceWorkflowRun("Some Other Name", ".github/workflows/project-governance.yml")).toBe(false);
+    expect(isWakeSourceWorkflowRun("Unrelated Workflow", ".github/workflows/unrelated.yml")).toBe(false);
+  });
+
+  it("never lists the wake or supervisor workflows themselves as a source, precluding a recursive wake chain", () => {
+    expect(isWakeSourceWorkflowRun(WAKE_WORKFLOW_NAME, WAKE_WORKFLOW_PATH)).toBe(false);
+    expect(isWakeSourceWorkflowRun("Autonomous supervisor", ".github/workflows/autonomy-supervisor.yml")).toBe(false);
+  });
+});
+
+describe("shouldWakeForSourceWorkflowRun: the unprivileged wake workflow's own workflow_run guard", () => {
+  const base = {
+    repositoryFullName: REPO,
+    expectedRepositoryFullName: REPO,
+  };
+  const governance = { workflowName: "Project governance", workflowPath: ".github/workflows/project-governance.yml" };
+  const claudeCode = { workflowName: "Claude Code", workflowPath: ".github/workflows/claude.yml" };
+
+  it("wakes on a successful Project governance completion", () => {
+    expect(shouldWakeForSourceWorkflowRun({ ...base, ...governance, action: "completed" })).toEqual({
+      handle: true,
+      reason: "source_workflow_run_event",
+    });
+  });
+
+  it("wakes on a FAILED Project governance completion too - failed CI is itself actionable", () => {
+    expect(
+      shouldWakeForSourceWorkflowRun({ ...base, ...governance, action: "completed", conclusion: "failure" }),
+    ).toEqual({ handle: true, reason: "source_workflow_run_event" });
+  });
+
+  it("wakes on a Claude Code completion regardless of its own conclusion - the supervisor re-reads fresh state rather than trusting it", () => {
+    expect(
+      shouldWakeForSourceWorkflowRun({ ...base, ...claudeCode, action: "completed", conclusion: "failure" }),
+    ).toEqual({ handle: true, reason: "source_workflow_run_event" });
+  });
+
+  it("fails closed when the event payload is missing/unreadable", () => {
+    expect(
+      shouldWakeForSourceWorkflowRun({ ...base, ...governance, action: "completed", payloadAvailable: false }),
+    ).toEqual({ handle: false, reason: "missing_or_unreadable_event_payload" });
+  });
+
+  it("skips a non-completed workflow_run action", () => {
+    expect(shouldWakeForSourceWorkflowRun({ ...base, ...governance, action: "requested" })).toEqual({
+      handle: false,
+      reason: "irrelevant_workflow_run_action",
+    });
+  });
+
+  it("skips a wrong-repository event", () => {
+    expect(
+      shouldWakeForSourceWorkflowRun({
+        ...governance,
+        action: "completed",
+        repositoryFullName: "someone-else/other-repo",
+        expectedRepositoryFullName: REPO,
+      }),
+    ).toEqual({ handle: false, reason: "wrong_repository" });
+  });
+
+  it("skips an unrelated workflow's completion", () => {
+    expect(
+      shouldWakeForSourceWorkflowRun({
+        ...base,
+        action: "completed",
+        workflowName: "Some Unrelated Workflow",
+        workflowPath: ".github/workflows/some-unrelated.yml",
+      }),
+    ).toEqual({ handle: false, reason: "unrelated_workflow" });
+  });
+
+  it("skips a same-name forged-path run", () => {
+    expect(
+      shouldWakeForSourceWorkflowRun({
+        ...base,
+        action: "completed",
+        workflowName: "Project governance",
+        workflowPath: ".github/workflows/forged.yml",
+      }),
+    ).toEqual({ handle: false, reason: "unrelated_workflow" });
+  });
+
+  it("never wakes on its own completion or the secret-bearing supervisor's completion, precluding a recursive chain", () => {
+    expect(
+      shouldWakeForSourceWorkflowRun({
+        ...base,
+        action: "completed",
+        workflowName: WAKE_WORKFLOW_NAME,
+        workflowPath: WAKE_WORKFLOW_PATH,
+      }),
+    ).toEqual({ handle: false, reason: "unrelated_workflow" });
+    expect(
+      shouldWakeForSourceWorkflowRun({
+        ...base,
+        action: "completed",
+        workflowName: "Autonomous supervisor",
+        workflowPath: ".github/workflows/autonomy-supervisor.yml",
+      }),
+    ).toEqual({ handle: false, reason: "unrelated_workflow" });
   });
 });

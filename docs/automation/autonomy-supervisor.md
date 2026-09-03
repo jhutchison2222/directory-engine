@@ -39,16 +39,20 @@ event types has a definition that is always the reviewed, merged version.
 The supervisor is therefore split into two workflows:
 
 - **`.github/workflows/autonomy-wake.yml`** ("Autonomy wake") - unprivileged.
-  Triggered directly by `pull_request`, `pull_request_review`, and
-  `issue_comment`. Holds `permissions: contents: read` only, no
+  Triggered directly by `pull_request`, `pull_request_review`,
+  `issue_comment`, and - for the immediate check/implementation-completion
+  handoff - `workflow_run: workflows: ["Project governance", "Claude Code"],
+  types: [completed]`. Holds `permissions: contents: read` only, no
   `CHATGPT_WORKSPACE_AGENT_ID`/`CHATGPT_WORKSPACE_AGENT_TOKEN`, and no other
   secret. It checks out the repository's **default branch** (never the PR
   head or merge ref, regardless of what triggered it) and runs exactly one
   script, `scripts/run-autonomy-wake.mjs`, which makes no GitHub API calls,
   treats the event payload purely as parsed JSON data (never executed,
   sourced, or interpolated into a shell command), and exits `0` (success) or
-  `1` (irrelevant/self/bot-generated/out-of-repository event) via the same
-  tested `shouldHandleEvent` gate the supervisor itself uses. Even though a
+  `1` (irrelevant/self/bot-generated/out-of-repository event) via
+  `shouldHandleEvent` for the PR/review/comment events and the dedicated
+  `shouldWakeForSourceWorkflowRun` guard for the `workflow_run` events - see
+  "Immediate check/implementation-completion handoff" below. Even though a
   malicious PR could rewrite *this* workflow's own definition too (it is
   triggered by `pull_request`/`pull_request_review`), doing so gains an
   attacker nothing: there is no credential to steal, and its only observable
@@ -114,22 +118,55 @@ reference of any kind appears in the wake workflow.
   (currently empty; see "Open items" below), never a repository variable or
   issue/PR content; `github-actions[bot]` can never be on that allowlist
   regardless of configuration), and the event's own action/comment-scope
-  filter. The secret-bearing supervisor's own
-  `workflow_run` handling separately requires the completing run to match
-  the wake workflow's fixed name *and* path (`WAKE_WORKFLOW_NAME`/
+  filter.
+- **Immediate check/implementation-completion handoff** - the same
+  unprivileged wake workflow *also* reacts directly to `workflow_run:
+  types: [completed]`, scoped by GitHub's own `workflows:` trigger filter to
+  exactly `"Project governance"` and `"Claude Code"` (this repository's
+  governance CI and Claude implementer workflows). The dedicated
+  `shouldWakeForSourceWorkflowRun` guard (`supervisor-event-guard.mjs`) -
+  deliberately separate from `shouldHandleEvent`'s own `workflow_run` case
+  described below, so the two different trust boundaries ("which workflow
+  may wake the wake workflow" vs. "which workflow may wake the supervisor")
+  are never blurred behind one piece of matching logic - requires: a
+  readable event payload (fails closed otherwise), a matching repository,
+  action `completed`, and the completing run's name *and* path to match one
+  of the two fixed `WAKE_SOURCE_WORKFLOWS` entries
+  (`supervisor-event-guard.mjs`): `"Project governance"` at
+  `.github/workflows/project-governance.yml`, or `"Claude Code"` at
+  `.github/workflows/claude.yml`. Matching both the human-readable name and
+  the immutable file path stops a same-repository pull request from forging
+  a wake trigger by adding a second workflow file elsewhere in
+  `.github/workflows/` with a matching `name:`. Unlike every other
+  `workflow_run` guard in this system, **the source run's `conclusion` is
+  never checked** - a failed `Project governance` run is itself actionable
+  (something needs fixing), and a completed `Claude Code` run wakes
+  evaluation regardless of its own outcome, because the supervisor always
+  re-reads fresh repository state rather than trusting the source run's
+  conclusion as acceptance. Neither `WAKE_SOURCE_WORKFLOWS` entry is
+  `"Autonomy wake"` or `"Autonomous supervisor"` themselves, so this handoff
+  can never form a self-triggering loop between the wake and supervisor
+  workflows.
+
+  The secret-bearing supervisor's own `workflow_run` handling (still via the
+  shared `shouldHandleEvent`) separately requires the completing run to
+  match the *wake* workflow's fixed name *and* path (`WAKE_WORKFLOW_NAME`/
   `WAKE_WORKFLOW_PATH` in `supervisor-event-guard.mjs`) and have
   `conclusion: success` - a same-named forged workflow elsewhere in
-  `.github/workflows/`, or a wake run that itself decided to skip, can never
-  wake the supervisor.
+  `.github/workflows/`, or a wake run that itself decided to skip (exit 1,
+  reported as `conclusion: failure`/non-`success`), can never wake the
+  supervisor. This case is unchanged by the immediate-handoff addition above
+  and is not widened to accept the two source workflows directly.
 
-  All triggers - schedule, manual, and event-driven - share one
-  non-overlapping concurrency group on the supervisor workflow and compute
-  the identical deterministic idempotency key for identical state, so no
-  combination of them can duplicate a dispatch.
+  All triggers - schedule, manual, and event-driven (including both the
+  direct PR/review/comment path and the workflow_run handoff path) - share
+  one non-overlapping concurrency group on the supervisor workflow and
+  compute the identical deterministic idempotency key for identical state,
+  so no combination of them can duplicate a dispatch.
 
   This is an additive fast path only; the five-minute schedule remains the
-  recovery backstop regardless of webhook delivery or the wake workflow's
-  own availability.
+  recovery backstop regardless of webhook delivery or either workflow's own
+  availability.
 
   No public webhook receiver, external relay, Cloudflare Worker, or new
   credential is introduced. Every trigger is a native GitHub Actions webhook
@@ -211,11 +248,15 @@ under `scripts/lib/`:
   reads its own prior marker comments instead), trusted-marker-author
   filtering, and the same edited-comment provenance check as owner-verdict
   comments.
-- `supervisor-event-guard.mjs` - the pure gate, shared by both workflows'
-  entry scripts, deciding whether one event-driven invocation should proceed,
-  including the missing/unreadable-payload fail-closed check and (for the
-  supervisor's own `workflow_run` case) the wake workflow's fixed
-  name/path/conclusion checks.
+- `supervisor-event-guard.mjs` - the pure gates deciding whether one
+  event-driven invocation should proceed: `shouldHandleEvent` (shared by
+  both workflows' entry scripts) covers the wake workflow's direct
+  PR/review/comment path plus the supervisor's own `workflow_run` case
+  (fixed wake-workflow name/path/conclusion checks), and the dedicated
+  `shouldWakeForSourceWorkflowRun` covers only the wake workflow's own
+  `workflow_run` handoff from `Project governance`/`Claude Code`
+  (`WAKE_SOURCE_WORKFLOWS`, fixed name/path, any conclusion). Both include
+  the missing/unreadable-payload fail-closed check.
 - `supervisor-dispatch.mjs` - the fixed Workspace Agent trigger request
   against the official API contract, agent-id validation, the bounded
   non-secret dispatch instruction, and fail-closed credential handling.
@@ -446,10 +487,12 @@ review of PR #26):
 
 ## Pre-merge vs. post-merge acceptance evidence, and rollback
 
-The `workflow_run` chain that wakes the secret-bearing supervisor cannot
-become active until `autonomy-wake.yml` and `autonomy-supervisor.yml` are
-both present on the repository's default branch - GitHub only recognizes a
-`workflow_run` relationship between workflows that already exist there.
+Both `workflow_run` chains - `Project governance`/`Claude Code` waking
+`autonomy-wake.yml`, and `autonomy-wake.yml` waking the secret-bearing
+`autonomy-supervisor.yml` - cannot become active until all of the referenced
+workflows are present on the repository's default branch - GitHub only
+recognizes a `workflow_run` relationship between workflows that already
+exist there.
 **Pre-merge acceptance can therefore only ever cover**: exact-head Project
 governance (install/typecheck/test/governance-validator), the structural and
 security-boundary tests described throughout this document, the harmless
@@ -503,7 +546,13 @@ partial or inconsistent state left behind.
   either workflow's own job is therefore expected and is never Project
   governance evidence - `supervisor-ci.mjs` only ever considers runs
   matching both the fixed name *and* path of `project-governance.yml`, so
-  this cannot affect the acceptance calculation either way.
+  this cannot affect the acceptance calculation either way. The same applies
+  to the immediate handoff itself: `workflow_run` is only ever recognized by
+  GitHub between workflows that already exist on the default branch, so
+  `autonomy-wake.yml`'s new `workflow_run` trigger (reacting to `Project
+  governance`/`Claude Code`) cannot actually fire until this pull request
+  merges, exactly like the wake-to-supervisor handoff described in "Pre-merge
+  vs. post-merge acceptance evidence" below.
 
 ## Harmless proof
 
@@ -521,7 +570,15 @@ with a fake GitHub store and a call-counting fake Workspace Agent dispatcher.
 `test/autonomy-wake-workflow.test.mjs` and
 `test/autonomy-supervisor-workflow.test.mjs` separately prove the two
 workflow files' own trigger/permission/checkout/credential-isolation
-properties by inspecting their committed text. None of this touches a live
+properties by inspecting their committed text, including the wake
+workflow's new `workflow_run` trigger scoped to exactly `Project
+governance`/`Claude Code`. `test/supervisor-event-guard.test.mjs` covers
+`shouldWakeForSourceWorkflowRun` and `isWakeSourceWorkflowRun` directly:
+success and failure of `Project governance` both wake evaluation, `Claude
+Code` completion wakes evaluation regardless of its own conclusion, a
+same-name/forged-path run is rejected, an unrelated workflow is rejected,
+and neither the wake nor the supervisor workflow can appear as its own
+source (precluding a recursive wake chain). None of this touches a live
 system, calls the real GitHub API, performs a real `workflow_run` hand-off
-between the two live workflows, or is a substitute for the post-merge live
+between the live workflows, or is a substitute for the post-merge live
 verification called out above.

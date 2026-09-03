@@ -104,6 +104,70 @@ export function isExplicitlyTrustedBotLogin(senderLogin, trustedBotLogins) {
 }
 
 /**
+ * The fixed, reviewed "implementation/CI completion" source workflows whose
+ * completion is relevant to the unprivileged wake workflow's own
+ * `workflow_run` trigger: the governance CI run and Claude's own completion.
+ * Matched by both name (readable) and path (immutable), for the identical
+ * forgery reason as WAKE_WORKFLOW_NAME/WAKE_WORKFLOW_PATH and
+ * GOVERNANCE_WORKFLOW_NAME/GOVERNANCE_WORKFLOW_PATH (see supervisor-ci.mjs):
+ * a same-repository pull request could otherwise add a second workflow file
+ * elsewhere in .github/workflows/ with a matching `name:` and a trivial
+ * always-succeeding job. Neither entry is "Autonomy wake" or "Autonomous
+ * supervisor" themselves, so this list can never form a self-triggering
+ * loop between the two DE-0010 workflows.
+ */
+export const WAKE_SOURCE_WORKFLOWS = Object.freeze([
+  Object.freeze({ name: "Project governance", path: ".github/workflows/project-governance.yml" }),
+  Object.freeze({ name: "Claude Code", path: ".github/workflows/claude.yml" }),
+]);
+
+export function isWakeSourceWorkflowRun(workflowName, workflowPath) {
+  return WAKE_SOURCE_WORKFLOWS.some((entry) => entry.name === workflowName && entry.path === workflowPath);
+}
+
+/**
+ * Dedicated guard for the unprivileged wake workflow's OWN `workflow_run`
+ * trigger - completion of `Project governance` or `Claude Code`, exactly
+ * the two fixed source workflows above. Deliberately kept separate from
+ * `shouldHandleEvent`'s existing `workflow_run` case (below), which is the
+ * secret-bearing supervisor's guard for "Autonomy wake"'s own completion
+ * and requires `conclusion: success`: widening that shared case to also
+ * accept these two source workflows would blur two different trust
+ * boundaries - which workflow is allowed to wake which - behind one piece
+ * of matching logic.
+ *
+ * Unlike the supervisor's wake-completion guard, both success AND failure
+ * wake evaluation here: a failed governance run is itself actionable (CI
+ * broke), and a completed Claude run - whatever its outcome - means fresh PR
+ * state may be ready to re-evaluate; the supervisor always re-reads fresh
+ * repository state rather than trusting the source run's own conclusion as
+ * acceptance. Only the run's `status` (must be "completed") is checked, not
+ * its `conclusion`.
+ */
+export function shouldWakeForSourceWorkflowRun({
+  payloadAvailable = true,
+  action,
+  repositoryFullName,
+  expectedRepositoryFullName,
+  workflowName,
+  workflowPath,
+} = {}) {
+  if (!payloadAvailable) {
+    return { handle: false, reason: "missing_or_unreadable_event_payload" };
+  }
+  if (typeof expectedRepositoryFullName === "string" && repositoryFullName !== expectedRepositoryFullName) {
+    return { handle: false, reason: "wrong_repository" };
+  }
+  if (action !== "completed") {
+    return { handle: false, reason: "irrelevant_workflow_run_action" };
+  }
+  if (!isWakeSourceWorkflowRun(workflowName, workflowPath)) {
+    return { handle: false, reason: "unrelated_workflow" };
+  }
+  return { handle: true, reason: "source_workflow_run_event" };
+}
+
+/**
  * DE-0010 cycle 3/3: a prior version rejected *every* non-`workflow_run`
  * event whose sender type was `Bot`, which is the correct default for
  * recursion prevention (the supervisor's own `github-actions[bot]` marker
