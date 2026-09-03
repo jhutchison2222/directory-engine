@@ -233,7 +233,29 @@ under `scripts/lib/`:
   counts. Matching by path in addition to name is what stops a
   same-repository pull request from forging acceptance by adding a second
   workflow file elsewhere in `.github/workflows/` with an identical
-  human-readable `name:`.
+  human-readable `name:`. DE-0010-R1 (governance workflow-file trust
+  rooting): matching the fixed name and path still only proves which
+  workflow *file path* produced a run, not which *content* GitHub loaded
+  from that path - a `pull_request`-triggered workflow's own YAML
+  definition is loaded from the pull request's own ref, so a
+  same-repository pull request can rewrite
+  `.github/workflows/project-governance.yml` itself (e.g. replacing its
+  real steps with a trivial `exit 0`) and still produce a completed,
+  successful, name+path-matching run at its own exact head - the same
+  control-plane-loading gap documented above for the wake/supervisor split,
+  now closed for the governance workflow too. `evaluateGovernanceEvidence`
+  additionally requires `isGovernanceWorkflowFileTrusted`: the exact bytes
+  of the governance workflow file at the pull request's head must match the
+  repository's default branch's copy (read directly from the local
+  checkout the supervisor workflow always makes of the default branch - see
+  "Architecture: the workflow split" above - not a separate, spoofable
+  network round trip) before a `"success"` conclusion is ever reported as
+  such. A same-name/path run whose workflow file does not match - or whose
+  content could not be read on either side - is reported as `"untrusted"`
+  instead of `"success"`, and `supervisor-policy.mjs` treats `"untrusted"`
+  exactly like `"failure"`: it can never reach the merge-ready branch,
+  regardless of the run's own conclusion or of any owner ACCEPTED verdict
+  recorded at that same head.
 - `supervisor-provenance.mjs` - the single fail-closed
   `isUneditedProvenance` check used everywhere a **comment** body is trusted
   as evidence (owner-verdict conversation comments, dispatch markers): both
@@ -306,6 +328,14 @@ evidence differently:
   comment (GitHub preserves the original author on an edit, so author
   identity alone is not proof the body is still what the owner wrote) is
   never trusted, regardless of the identity that appears to have authored it.
+  DE-0010-R1: a **blockquoted** ACCEPTED line (`> ACCEPTED — exact head
+  <sha>`, as GitHub renders a quoted reply or a quoted earlier draft) can
+  never satisfy this marker either, even from the owner's own trusted,
+  unedited comment - quoting a line is not the same act as asserting it.
+  The Markdown blockquote marker `>` was previously included in the
+  marker's harmless-decoration character class alongside bold/italic/
+  heading markers; it has been removed, so a line beginning with `>` can
+  never be mistaken for a standalone assertion.
 - A **formal PR review** is first excluded entirely if its native state is
   `DISMISSED` or `PENDING`, and otherwise counts *only* via its own
   immutable native GitHub verdict (`APPROVED` -> accepted,

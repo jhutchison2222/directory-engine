@@ -101,10 +101,34 @@ describe("classifyOwnerCommentBody", () => {
       kind: OWNER_VERDICT_KINDS.ACCEPTED,
       headSha: HEAD_A,
     });
-    expect(classifyOwnerCommentBody(`> ACCEPTED — exact head ${HEAD_A}`)).toEqual({
+    expect(classifyOwnerCommentBody(`### ACCEPTED — exact head ${HEAD_A}`)).toEqual({
       kind: OWNER_VERDICT_KINDS.ACCEPTED,
       headSha: HEAD_A,
     });
+  });
+
+  it("DE-0010-R1 regression: a blockquoted/reply-quoted ACCEPTED line can never create acceptance", () => {
+    // GitHub renders a quoted line (a reply quoting an earlier comment, or
+    // the owner quoting a rejected/superseded draft while discussing it)
+    // with a leading "> ". Quoting a marker is not the same act as asserting
+    // it, so this must fail closed exactly like negated/qualified prose does
+    // - even though the blockquote is the only thing preceding "ACCEPTED" on
+    // the line.
+    expect(classifyOwnerCommentBody(`> ACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+    expect(classifyOwnerCommentBody(`>ACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+    expect(classifyOwnerCommentBody(`>> ACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+    expect(
+      classifyOwnerCommentBody(
+        `Someone else claimed:\n> ACCEPTED — exact head ${HEAD_A}\n\nI have not reviewed this yet.`,
+      ),
+    ).toBeNull();
+    // A genuine, unquoted marker line elsewhere in the same body is still
+    // honored - only the quoted line itself fails closed.
+    expect(
+      classifyOwnerCommentBody(
+        `> ACCEPTED — exact head ${HEAD_B}\n\nThat quote is stale.\n\nACCEPTED — exact head ${HEAD_A}`,
+      ),
+    ).toEqual({ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: HEAD_A });
   });
 
   it("resolves combined blocking evidence safely when an ACCEPTED line and a later blocking marker line both exist", () => {

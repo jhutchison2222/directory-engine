@@ -1,6 +1,7 @@
+import { readFile } from "node:fs/promises";
 import { readGithubEvent } from "./lib/read-github-event.mjs";
 import { runAutonomySupervisor } from "./lib/supervisor-run.mjs";
-import { summarizeGovernanceWorkflowRuns } from "./lib/supervisor-ci.mjs";
+import { GOVERNANCE_WORKFLOW_PATH, evaluateGovernanceEvidence } from "./lib/supervisor-ci.mjs";
 import { buildOwnerVerdictEvents } from "./lib/supervisor-verdicts.mjs";
 import { filterTrustedDispatchMarkers } from "./lib/supervisor-idempotency.mjs";
 import { shouldHandleEvent } from "./lib/supervisor-event-guard.mjs";
@@ -120,6 +121,44 @@ function buildCommentsForVerdicts(comments) {
   }));
 }
 
+/**
+ * DE-0010-R1: reads the repository's default-branch copy of the governance
+ * workflow file directly off the local working tree, rather than making a
+ * network call for it. Both autonomy workflows always check out the
+ * repository's default branch (never a PR head or merge ref) before
+ * invoking this script - see docs/automation/autonomy-supervisor.md - so
+ * the local checkout already *is* the trusted default-branch content. A
+ * read failure (the file does not exist locally, e.g. before this pull
+ * request first merges - see the bootstrap note in
+ * docs/automation/autonomy-supervisor.md) fails closed to `null`, which
+ * `isGovernanceWorkflowFileTrusted` in supervisor-ci.mjs never treats as
+ * trusted.
+ */
+async function readDefaultBranchGovernanceWorkflowFile() {
+  try {
+    return await readFile(GOVERNANCE_WORKFLOW_PATH, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetches the exact byte content of one file at one exact ref via GitHub's
+ * Contents API, decoding it from the API's base64 encoding. Fails closed to
+ * `null` on any error (missing file, API error, unexpected shape) rather
+ * than throwing - a pull request that cannot be read is never trusted by
+ * default.
+ */
+async function fetchFileContentAtRef(token, owner, repo, path, ref) {
+  try {
+    const data = await githubRequest(token, `/repos/${owner}/${repo}/contents/${path}?ref=${ref}`);
+    if (typeof data?.content !== "string" || data.encoding !== "base64") return null;
+    return Buffer.from(data.content, "base64").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
 function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
   const repositoryFullName = `${owner}/${repo}`;
 
@@ -127,15 +166,14 @@ function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
     now: new Date(),
 
     async listPullRequests() {
-      const pulls = await githubPaginated(
-        token,
-        `${GITHUB_API}/repos/${owner}/${repo}/pulls?state=open&per_page=100`,
-        (page) => page,
-      );
+      const [pulls, defaultBranchGovernanceWorkflowContent] = await Promise.all([
+        githubPaginated(token, `${GITHUB_API}/repos/${owner}/${repo}/pulls?state=open&per_page=100`, (page) => page),
+        readDefaultBranchGovernanceWorkflowFile(),
+      ]);
       const snapshots = [];
       for (const pull of pulls) {
         const headSha = pull.head.sha;
-        const [workflowRuns, reviews, comments] = await Promise.all([
+        const [workflowRuns, reviews, comments, headGovernanceWorkflowContent] = await Promise.all([
           githubPaginated(
             token,
             `${GITHUB_API}/repos/${owner}/${repo}/actions/runs?head_sha=${headSha}&per_page=100`,
@@ -151,13 +189,21 @@ function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
             `${GITHUB_API}/repos/${owner}/${repo}/issues/${pull.number}/comments?per_page=100`,
             (page) => page,
           ),
+          fetchFileContentAtRef(token, owner, repo, GOVERNANCE_WORKFLOW_PATH, headSha),
         ]);
         snapshots.push({
           number: pull.number,
           headSha,
           isDraft: pull.draft === true,
           labels: (pull.labels ?? []).map((label) => label.name),
-          checks: summarizeGovernanceWorkflowRuns(workflowRuns.map(normalizeWorkflowRun), headSha),
+          checks: evaluateGovernanceEvidence({
+            workflowRuns: workflowRuns.map(normalizeWorkflowRun),
+            headSha,
+            workflowFileTrust: {
+              headContent: headGovernanceWorkflowContent,
+              defaultBranchContent: defaultBranchGovernanceWorkflowContent,
+            },
+          }),
           ownerVerdictEvents: buildOwnerVerdictEvents({
             ownerLogin,
             comments: buildCommentsForVerdicts(comments),

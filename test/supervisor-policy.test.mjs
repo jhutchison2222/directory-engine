@@ -114,6 +114,18 @@ describe("evaluatePullRequestAction: exact-head governance CI state", () => {
     );
     expect(decision).toEqual({ action: "skip", reason: "awaiting_ci" });
   });
+
+  it("DE-0010-R1 regression: an 'untrusted' governance conclusion (name+path success from a tampered workflow file) dispatches ci_failed, never merge_ready, even with a clean owner ACCEPTED verdict at the exact same head", () => {
+    const decision = evaluatePullRequestAction(
+      pr({
+        checks: { headSha: HEAD_A, conclusion: "untrusted" },
+        ownerVerdictEvents: [verdict(OWNER_VERDICT_KINDS.ACCEPTED, HEAD_A, "2026-09-02T10:00:00Z")],
+      }),
+      NOW,
+    );
+    expect(decision.action).toBe("dispatch");
+    expect(decision.reason).toBe(REASONS.CI_FAILED);
+  });
 });
 
 describe("evaluatePullRequestAction: exact-head owner verdict chronology", () => {

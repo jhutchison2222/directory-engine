@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   GOVERNANCE_WORKFLOW_NAME,
   GOVERNANCE_WORKFLOW_PATH,
+  evaluateGovernanceEvidence,
+  isGovernanceWorkflowFileTrusted,
   isGovernanceWorkflowRun,
   summarizeGovernanceWorkflowRuns,
 } from "../scripts/lib/supervisor-ci.mjs";
@@ -174,5 +176,104 @@ describe("summarizeGovernanceWorkflowRuns", () => {
       HEAD_A,
     );
     expect(forgedAlongsideReal).toEqual({ headSha: HEAD_A, conclusion: "failure" });
+  });
+});
+
+const DEFAULT_BRANCH_WORKFLOW_CONTENT = "name: Project governance\non:\n  pull_request:\n";
+
+describe("isGovernanceWorkflowFileTrusted", () => {
+  it("trusts only byte-identical content on both sides", () => {
+    expect(
+      isGovernanceWorkflowFileTrusted({
+        headContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+        defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+      }),
+    ).toBe(true);
+  });
+
+  it("DE-0010-R1 regression: never trusts a tampered governance workflow file, even by one character", () => {
+    const tampered = `${DEFAULT_BRANCH_WORKFLOW_CONTENT}  push:\n`;
+    expect(
+      isGovernanceWorkflowFileTrusted({ headContent: tampered, defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT }),
+    ).toBe(false);
+  });
+
+  it("fails closed when either side is missing, unreadable, or empty", () => {
+    expect(isGovernanceWorkflowFileTrusted({ headContent: null, defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT })).toBe(
+      false,
+    );
+    expect(isGovernanceWorkflowFileTrusted({ headContent: DEFAULT_BRANCH_WORKFLOW_CONTENT, defaultBranchContent: null })).toBe(
+      false,
+    );
+    expect(isGovernanceWorkflowFileTrusted({ headContent: "", defaultBranchContent: "" })).toBe(false);
+    expect(isGovernanceWorkflowFileTrusted({})).toBe(false);
+  });
+});
+
+describe("evaluateGovernanceEvidence", () => {
+  it("clean exact-head governance: a successful run with a trusted, matching workflow file reports success", () => {
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "completed", conclusion: "success", startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: {
+        headContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+        defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+      },
+    });
+    expect(result).toEqual({ headSha: HEAD_A, conclusion: "success" });
+  });
+
+  it("DE-0010-R1 regression: a pull request that tampers with its own governance workflow while producing a same-name/path success run is never trusted", () => {
+    const tamperedWorkflowContent = "name: Project governance\non:\n  pull_request:\njobs:\n  verify:\n    run: exit 0\n";
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "completed", conclusion: "success", startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: {
+        headContent: tamperedWorkflowContent,
+        defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+      },
+    });
+    expect(result).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("DE-0010-R1 regression: a stale or unreadable default-branch copy never lets a mismatched head pass as trusted", () => {
+    // The default-branch fetch failed (e.g. transient error, or this
+    // pull request predates the governance workflow file's existence) - the
+    // absence of a comparison target must never be treated as "nothing to
+    // compare against, so trust it".
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "completed", conclusion: "success", startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: DEFAULT_BRANCH_WORKFLOW_CONTENT, defaultBranchContent: null },
+    });
+    expect(result).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("never downgrades a pending or failing run: file-trust evidence only matters for an otherwise-successful run", () => {
+    const pending = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "in_progress", conclusion: null, startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: "tampered", defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT },
+    });
+    expect(pending).toEqual({ headSha: HEAD_A, conclusion: "pending" });
+
+    const failing = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "completed", conclusion: "failure", startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: "tampered", defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT },
+    });
+    expect(failing).toEqual({ headSha: HEAD_A, conclusion: "failure" });
+  });
+
+  it("returns null (awaiting_ci) when no governance run exists yet at this head, regardless of file-trust evidence", () => {
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: [],
+      headSha: HEAD_A,
+      workflowFileTrust: {
+        headContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+        defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+      },
+    });
+    expect(result).toBeNull();
   });
 });

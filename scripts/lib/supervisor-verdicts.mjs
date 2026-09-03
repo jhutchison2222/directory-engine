@@ -57,9 +57,9 @@ import { isUneditedProvenance } from "./supervisor-provenance.mjs";
  * word "accepted" elsewhere in a sentence could all still match and be
  * misread as acceptance. Rather than enumerate more negations, the ACCEPTED
  * marker is now anchored to require a whole standalone line: once optional,
- * letter-free Markdown decoration (bold/italic markers, blockquote/heading/
- * bullet markers, backticks/quotes, whitespace) is stripped from each end of
- * a line, the remainder must read exactly `ACCEPTED — exact head <sha>`. Any
+ * letter-free Markdown decoration (bold/italic markers, heading/bullet
+ * markers, backticks/quotes, whitespace) is stripped from each end of a
+ * line, the remainder must read exactly `ACCEPTED — exact head <sha>`. Any
  * literal word before "ACCEPTED" on that line - a negation, a qualifier, or
  * ordinary prose - contains letters, which the decoration class excludes, so
  * the line-start anchor rejects the whole line rather than merely a
@@ -67,6 +67,18 @@ import { isUneditedProvenance } from "./supervisor-provenance.mjs";
  * REJECTED/SUPERSEDED/remediation markers below are unchanged and are still
  * checked first, so blocking evidence combined with an accepted-looking
  * clause in the same body still resolves to the blocking verdict.
+ *
+ * DE-0010-R1: the decoration class above originally also stripped the
+ * Markdown blockquote marker `>`, on the theory that it was harmless
+ * rendering decoration like bold/italic. It is not: a blockquote is how
+ * GitHub renders a *quoted* line - a reply quoting someone else's earlier
+ * comment, or the owner quoting a rejected/superseded draft of a marker
+ * while discussing it - and quoting a line is not the same act as asserting
+ * it. `> ACCEPTED — exact head <sha>` must never itself create acceptance,
+ * regardless of who posted the quoting comment or whether the quoted head
+ * matches. `>` is therefore no longer part of LINE_DECORATION, so any line
+ * beginning with a blockquote marker can never satisfy the standalone
+ * ACCEPTED anchor; only a genuinely unquoted marker line still matches.
  */
 
 export const OWNER_VERDICT_KINDS = Object.freeze({
@@ -99,14 +111,16 @@ const REMEDIATION_MARKER = new RegExp(
   "i",
 );
 // Letter-free Markdown/whitespace decoration that may harmlessly wrap a
-// standalone ACCEPTED marker line: emphasis markers, blockquote/heading/
-// bullet markers, backticks/quotes around a code-span SHA, and plain
-// whitespace. Because it contains no letters, any negated or qualified
-// phrase ("NOT YET ACCEPTED", "NEVER ACCEPTED", "NON-ACCEPTED",
-// "UN-ACCEPTED") or ordinary prose preceding the word "ACCEPTED" can never
-// be consumed by this class, so the line-start anchor below can never reach
-// past it to the literal "ACCEPTED" token.
-const LINE_DECORATION = "[\\s*_>#`'\"-]*";
+// standalone ACCEPTED marker line: emphasis markers, heading/bullet markers,
+// backticks/quotes around a code-span SHA, and plain whitespace. Because it
+// contains no letters, any negated or qualified phrase ("NOT YET ACCEPTED",
+// "NEVER ACCEPTED", "NON-ACCEPTED", "UN-ACCEPTED") or ordinary prose
+// preceding the word "ACCEPTED" can never be consumed by this class, so the
+// line-start anchor below can never reach past it to the literal "ACCEPTED"
+// token. `>` (the Markdown blockquote marker) is deliberately excluded: a
+// blockquoted line is a *quoted* line, not an assertion, and must never
+// satisfy this marker regardless of what it quotes.
+const LINE_DECORATION = "[\\s*_#`'\"-]*";
 
 // The only pattern that can ever create an ACCEPTED verdict: a standalone
 // marker line that, once LINE_DECORATION is stripped from each end, reads

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -11,9 +11,25 @@ import { fileURLToPath } from "node:url";
  * anything beyond this one trusted, reviewed script from a checkout of the
  * repository's default branch (never the PR head/merge ref, regardless of
  * what triggered it).
+ *
+ * DE-0010-R1: following the post-merge security findings that led to
+ * disabling both autonomy workflow files pending review (see
+ * docs/automation/autonomy-supervisor.md), this file is intentionally
+ * absent from every code-only remediation branch - a maintainer applies the
+ * exact reviewed YAML directly, as with every prior workflow-file change in
+ * this packet. These structural tests are skipped (never silently deleted)
+ * while the file is absent, and run again automatically once it is
+ * reinstated.
  */
 const WORKFLOW_PATH = fileURLToPath(new URL("../.github/workflows/autonomy-wake.yml", import.meta.url));
-const workflow = readFileSync(WORKFLOW_PATH, "utf8");
+const workflowFileExists = existsSync(WORKFLOW_PATH);
+const workflow = workflowFileExists ? readFileSync(WORKFLOW_PATH, "utf8") : "";
+
+describe.skipIf(workflowFileExists)("autonomy-wake.yml: workflow file intentionally absent", () => {
+  it("is pending maintainer-applied insertion of the reviewed YAML; structural tests below are skipped, not deleted", () => {
+    expect(workflowFileExists).toBe(false);
+  });
+});
 
 function extractTopLevelBlock(source, key) {
   const lines = source.split("\n");
@@ -28,7 +44,7 @@ function extractTopLevelBlock(source, key) {
   return blockLines.join("\n");
 }
 
-describe("autonomy-wake.yml: no credential can ever enter this PR-controlled-trigger workflow", () => {
+describe.skipIf(!workflowFileExists)("autonomy-wake.yml: no credential can ever enter this PR-controlled-trigger workflow", () => {
   it("never references the Workspace Agent id or token, in any form", () => {
     expect(workflow).not.toMatch(/CHATGPT_WORKSPACE_AGENT_ID/);
     expect(workflow).not.toMatch(/CHATGPT_WORKSPACE_AGENT_TOKEN/);
@@ -45,7 +61,7 @@ describe("autonomy-wake.yml: no credential can ever enter this PR-controlled-tri
   });
 });
 
-describe("autonomy-wake.yml: least-privilege, read-only permissions", () => {
+describe.skipIf(!workflowFileExists)("autonomy-wake.yml: least-privilege, read-only permissions", () => {
   it("grants only contents: read - no write permission of any kind", () => {
     const permissions = extractTopLevelBlock(workflow, "permissions");
     const scopeLines = permissions.split("\n").filter((line) => line.trim().length > 0);
@@ -55,7 +71,7 @@ describe("autonomy-wake.yml: least-privilege, read-only permissions", () => {
   });
 });
 
-describe("autonomy-wake.yml: trusted default-branch checkout, regardless of trigger", () => {
+describe.skipIf(!workflowFileExists)("autonomy-wake.yml: trusted default-branch checkout, regardless of trigger", () => {
   it("checks out the repository's default branch with persisted credentials disabled", () => {
     const checkoutIndex = workflow.indexOf("uses: actions/checkout@");
     expect(checkoutIndex).toBeGreaterThan(-1);
@@ -78,7 +94,7 @@ describe("autonomy-wake.yml: trusted default-branch checkout, regardless of trig
   });
 });
 
-describe("autonomy-wake.yml: trigger surface", () => {
+describe.skipIf(!workflowFileExists)("autonomy-wake.yml: trigger surface", () => {
   it("reacts to the guarded pull_request/pull_request_review/issue_comment events", () => {
     expect(workflow).toMatch(/^\s*pull_request:\s*$/m);
     expect(workflow).toMatch(/^\s*pull_request_review:\s*$/m);

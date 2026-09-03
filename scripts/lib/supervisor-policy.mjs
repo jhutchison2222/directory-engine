@@ -163,9 +163,17 @@ export function computeIssueStateFingerprint(issue) {
  * current head SHA are trusted as evidence; anything recorded against an
  * older head is stale and is treated as absent, forcing a fresh evaluation.
  *
- * `pr.checks` is `{ headSha, conclusion: "success" | "failure" | "pending" }
- *   | null` and must already be scoped to the named governance workflow run
- * by the caller (see summarizeGovernanceWorkflowRuns in supervisor-ci.mjs).
+ * `pr.checks` is `{ headSha, conclusion: "success" | "failure" | "pending" |
+ *   "untrusted" } | null` and must already be scoped to the named governance
+ * workflow run, with governance-workflow-file trust evidence folded in, by
+ * the caller (see evaluateGovernanceEvidence in supervisor-ci.mjs).
+ * `"untrusted"` (DE-0010-R1) means a completed governance run exists with
+ * the right fixed name and path, but the governance workflow file that
+ * produced it does not match the repository's default-branch reviewed
+ * copy - e.g. a pull request tampering with its own governance workflow
+ * while still landing a same-name/path "success" run - and is treated
+ * exactly like "failure" below: it can never be mistaken for passing
+ * governance evidence or reach the merge-ready branch.
  * `pr.ownerVerdictEvents` is an array of owner-authored verdict events (see
  * buildOwnerVerdictEvents in supervisor-verdicts.mjs) and must already have
  * every non-owner-authored comment/review filtered out by the caller; the
@@ -190,7 +198,12 @@ export function evaluatePullRequestAction(pr, now, dispatches = []) {
   }
 
   let reason;
-  if (checksAtHead.conclusion === "failure") {
+  if (checksAtHead.conclusion === "failure" || checksAtHead.conclusion === "untrusted") {
+    // "untrusted" (DE-0010-R1) is a completed, name+path-matching run whose
+    // governance workflow file does not match the default-branch reviewed
+    // copy - never eligible for merge-ready, and reported the same way a
+    // real CI failure is so remediation is requested rather than silently
+    // stalling.
     reason = REASONS.CI_FAILED;
   } else {
     const ownerVerdict = selectLatestOwnerVerdict(pr.ownerVerdictEvents, pr.headSha);
