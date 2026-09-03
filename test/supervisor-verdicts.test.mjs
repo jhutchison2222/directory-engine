@@ -131,6 +131,45 @@ describe("classifyOwnerCommentBody", () => {
     ).toEqual({ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: HEAD_A });
   });
 
+  it("DE-0010-R1 cycle 3 regression: a fenced-code-block ACCEPTED line can never create acceptance", () => {
+    // GitHub renders content between matching ``` fences as a code block -
+    // quoted example text, not an assertion - the same "quoting is not
+    // asserting" gap the blockquote fix closed, reopened via a sibling
+    // GitHub quoting mechanism.
+    expect(classifyOwnerCommentBody(`\`\`\`\nACCEPTED — exact head ${HEAD_A}\n\`\`\``)).toBeNull();
+    expect(classifyOwnerCommentBody(`\`\`\`text\nACCEPTED — exact head ${HEAD_A}\n\`\`\``)).toBeNull();
+    expect(classifyOwnerCommentBody(`~~~\nACCEPTED — exact head ${HEAD_A}\n~~~`)).toBeNull();
+    expect(
+      classifyOwnerCommentBody(
+        `That stale draft read:\n\n\`\`\`\nACCEPTED — exact head ${HEAD_A}\n\`\`\`\n\nI have not reviewed this yet.`,
+      ),
+    ).toBeNull();
+    // A genuine, unquoted marker line elsewhere in the same body is still
+    // honored - only the fenced line itself fails closed.
+    expect(
+      classifyOwnerCommentBody(
+        `\`\`\`\nACCEPTED — exact head ${HEAD_B}\n\`\`\`\n\nThat quote is stale.\n\nACCEPTED — exact head ${HEAD_A}`,
+      ),
+    ).toEqual({ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: HEAD_A });
+  });
+
+  it("DE-0010-R1 cycle 3 regression: a 4-space/tab-indented ACCEPTED line can never create acceptance", () => {
+    // GitHub renders a 4-space or tab-indented line as an indented code
+    // block - quoted example text, not an assertion.
+    expect(classifyOwnerCommentBody(`    ACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+    expect(classifyOwnerCommentBody(`\tACCEPTED — exact head ${HEAD_A}`)).toBeNull();
+    expect(
+      classifyOwnerCommentBody(
+        `That stale draft read:\n\n    ACCEPTED — exact head ${HEAD_A}\n\nI have not reviewed this yet.`,
+      ),
+    ).toBeNull();
+    // A genuine, unquoted marker line elsewhere in the same body is still
+    // honored - only the indented line itself fails closed.
+    expect(
+      classifyOwnerCommentBody(`    ACCEPTED — exact head ${HEAD_B}\n\nThat quote is stale.\n\nACCEPTED — exact head ${HEAD_A}`),
+    ).toEqual({ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: HEAD_A });
+  });
+
   it("resolves combined blocking evidence safely when an ACCEPTED line and a later blocking marker line both exist", () => {
     expect(
       classifyOwnerCommentBody(`ACCEPTED — exact head ${HEAD_A}\n\nREJECTED — exact head ${HEAD_A}`),

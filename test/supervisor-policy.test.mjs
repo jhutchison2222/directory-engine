@@ -126,6 +126,33 @@ describe("evaluatePullRequestAction: exact-head governance CI state", () => {
     expect(decision.action).toBe("dispatch");
     expect(decision.reason).toBe(REASONS.CI_FAILED);
   });
+
+  it("DE-0010-R1 cycle 3 (final) regression: an 'unavailable' governance conclusion (transient read failure) skips with no dispatch, even with a clean owner ACCEPTED verdict at the exact same head", () => {
+    const decision = evaluatePullRequestAction(
+      pr({
+        checks: { headSha: HEAD_A, conclusion: "unavailable" },
+        ownerVerdictEvents: [verdict(OWNER_VERDICT_KINDS.ACCEPTED, HEAD_A, "2026-09-02T10:00:00Z")],
+      }),
+      NOW,
+    );
+    expect(decision).toEqual({ action: "skip", reason: "checks_unavailable" });
+  });
+
+  it("DE-0010-R1 cycle 3 (final) regression: repeated 'unavailable' cycles never consume the remediation-cycle attempt budget or the packet-wide ceiling", () => {
+    // Unlike ci_failed, an unavailable conclusion must never itself produce
+    // a dispatch, so it can never appear in the dispatch history at all -
+    // this proves the skip path is reached instead of silently falling
+    // through to blocked once MAX_DISPATCH_ATTEMPTS_PER_KEY worth of cycles
+    // have passed.
+    const dispatches = [];
+    for (let i = 0; i < MAX_DISPATCH_ATTEMPTS_PER_KEY + 2; i += 1) {
+      const decision = evaluatePullRequestAction(pr({ checks: { headSha: HEAD_A, conclusion: "unavailable" } }), NOW, dispatches);
+      expect(decision).toEqual({ action: "skip", reason: "checks_unavailable" });
+      // A skip never records a dispatch - dispatches stays empty across every
+      // iteration, exactly like the awaiting_ci/pending skip path.
+    }
+    expect(dispatches).toEqual([]);
+  });
 });
 
 describe("evaluatePullRequestAction: exact-head owner verdict chronology", () => {

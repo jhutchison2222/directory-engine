@@ -267,6 +267,19 @@ describe("isGovernanceDecisionPathFile", () => {
     expect(isGovernanceDecisionPathFile("docs/vite.config.ts.example")).toBe(false);
     expect(isGovernanceDecisionPathFile("src/notvitest.config.ts")).toBe(false);
   });
+
+  it("DE-0010-R1 cycle 3 (final): matches the .json extension Vitest's own workspace/projects docs support, which the prior pattern omitted", () => {
+    // https://v2.vitest.dev/guide/workspace.html documents vitest.workspace
+    // and vitest.projects as supporting ts/js/json specifically - unlike
+    // vitest.config/vite.config, which have no JSON form.
+    expect(isGovernanceDecisionPathFile("vitest.workspace.json")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vitest.projects.json")).toBe(true);
+  });
+
+  it("DE-0010-R1 cycle 3 (final): does not extend the .json extension to vitest.config/vite.config, which have no supported JSON form", () => {
+    expect(isGovernanceDecisionPathFile("vitest.config.json")).toBe(false);
+    expect(isGovernanceDecisionPathFile("vite.config.json")).toBe(false);
+  });
 });
 
 describe("evaluateGovernanceEvidence", () => {
@@ -453,5 +466,69 @@ describe("evaluateGovernanceEvidence", () => {
       changedFilePaths: ["vitest.workspace.ts"],
     });
     expect(workspaceConfigAdded).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("DE-0010-R1 cycle 3 (final) regression: a transient failure reading the workflow file or the changed-file diff is reported as unavailable, not untrusted", () => {
+    const workflowFileUnavailable = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: null, defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT },
+      workflowFileUnavailable: true,
+      changedFilePaths: ["src/index.ts"],
+    });
+    expect(workflowFileUnavailable).toEqual({ headSha: HEAD_A, conclusion: "unavailable" });
+
+    const changedFilesUnavailable = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: null,
+      changedFilePathsUnavailable: true,
+    });
+    expect(changedFilesUnavailable).toEqual({ headSha: HEAD_A, conclusion: "unavailable" });
+  });
+
+  it("DE-0010-R1 cycle 3 (final) regression: definitive tamper/decision-path evidence always wins over an unrelated unavailable signal", () => {
+    // A genuine mismatch or decision-path edit is real, actionable evidence
+    // - it must never be softened to "unavailable" merely because some
+    // other, independent piece of evidence also could not be read this
+    // cycle.
+    const tamperedFileWithUnrelatedUnavailableDiff = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: "tampered", defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT },
+      changedFilePaths: null,
+      changedFilePathsUnavailable: true,
+    });
+    expect(tamperedFileWithUnrelatedUnavailableDiff).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+
+    const decisionPathEditWithUnrelatedUnavailableFile = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: null, defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT },
+      workflowFileUnavailable: true,
+      changedFilePaths: ["package.json"],
+    });
+    expect(decisionPathEditWithUnrelatedUnavailableFile).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("DE-0010-R1 cycle 3 (final) regression: an unavailable signal never downgrades a pending or failing run", () => {
+    const pending = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "in_progress", conclusion: null, startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      workflowFileUnavailable: true,
+      changedFilePaths: ["src/index.ts"],
+    });
+    expect(pending).toEqual({ headSha: HEAD_A, conclusion: "pending" });
+
+    const failing = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "completed", conclusion: "failure", startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: null,
+      changedFilePathsUnavailable: true,
+    });
+    expect(failing).toEqual({ headSha: HEAD_A, conclusion: "failure" });
   });
 });

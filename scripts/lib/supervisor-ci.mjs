@@ -209,15 +209,22 @@ export const GOVERNANCE_DECISION_PATH_FILES = Object.freeze([
 /**
  * Matches every supported extension of the Vitest/Vite config and workspace
  * filenames capable of changing which tests `npm test` runs or how:
- * `vitest.config`, `vitest.workspace`, `vitest.projects` (Vitest), and
- * `vite.config` (Vitest falls back to a discovered Vite config when it has
- * none of its own). Anchored so it only ever matches the exact root-level
- * filename (optionally nested one directory deep, matching how these tools
- * also discover a config file placed in a subdirectory) - never merely a
- * path that happens to contain one of these words elsewhere.
+ * `vitest.config` and `vite.config` (Vitest falls back to a discovered Vite
+ * config when it has none of its own) in every recognized script extension,
+ * and `vitest.workspace`/`vitest.projects` in every recognized script
+ * extension *plus* `.json` - Vitest's own workspace/projects documentation
+ * (https://v2.vitest.dev/guide/workspace.html) lists `.json` as a supported
+ * extension for those two filenames specifically, unlike `vitest.config`/
+ * `vite.config`, which do not support a JSON config file. Anchored so it
+ * only ever matches the exact root-level filename (optionally nested one
+ * directory deep, matching how these tools also discover a config file
+ * placed in a subdirectory) - never merely a path that happens to contain
+ * one of these words elsewhere.
  */
-export const GOVERNANCE_DECISION_PATH_CONFIG_PATTERN =
-  /(?:^|\/)(?:vitest\.config|vitest\.workspace|vitest\.projects|vite\.config)\.(?:ts|mts|cts|js|mjs|cjs)$/;
+export const GOVERNANCE_DECISION_PATH_CONFIG_PATTERN = new RegExp(
+  "(?:^|/)(?:vitest\\.config|vite\\.config)\\.(?:ts|mts|cts|js|mjs|cjs)$" +
+    "|(?:^|/)(?:vitest\\.workspace|vitest\\.projects)\\.(?:ts|mts|cts|js|mjs|cjs|json)$",
+);
 
 /** GitHub's compare API caps a single comparison at 300 changed files; see
  * the module docstring's cycle 3 note above.
@@ -251,6 +258,34 @@ export function isGovernanceDecisionPathFile(path) {
 }
 
 /**
+ * Evaluates the workflow-file byte-identity check in isolation, returning
+ * `"untrusted"` (a genuine mismatch, or an unreadable/missing side that is
+ * not a transient availability failure), `"unavailable"` (the caller
+ * marked this evidence as unreadable due to a transient/network/rate-limit/
+ * 5xx failure, not a genuine missing-or-mismatched file), or `"trusted"`.
+ */
+function evaluateWorkflowFileCheck(workflowFileTrust, workflowFileUnavailable) {
+  if (workflowFileUnavailable) return "unavailable";
+  return isGovernanceWorkflowFileTrusted(workflowFileTrust ?? {}) ? "trusted" : "untrusted";
+}
+
+/**
+ * Evaluates the changed-file decision-path check in isolation, with the
+ * same three-way result as evaluateWorkflowFileCheck above.
+ */
+function evaluateChangedFilesCheck(changedFilePaths, changedFilePathsUnavailable) {
+  if (changedFilePathsUnavailable) return "unavailable";
+  if (
+    !Array.isArray(changedFilePaths) ||
+    changedFilePaths.length >= CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP ||
+    changedFilePaths.some(isGovernanceDecisionPathFile)
+  ) {
+    return "untrusted";
+  }
+  return "trusted";
+}
+
+/**
  * Composes run evidence (summarizeGovernanceWorkflowRuns) with two
  * independent trust checks into the single evidence object
  * supervisor-policy.mjs consumes as `pr.checks`. A run is only ever reported
@@ -266,26 +301,53 @@ export function isGovernanceDecisionPathFile(path) {
  * compare API caps a single comparison at that many files, so a list at or
  * above the cap can never be trusted to be the *complete* list - a
  * decision-path edit could be sitting just past the cap, silently excluded.
- * A completed, green-conclusion run that fails any trust check - a tampered
- * governance workflow file, an untouched workflow file alongside a tampered
- * decision-path file, or unprovably-complete changed-file evidence - is
- * reported as `"untrusted"` instead of `"success"`, regardless of the run's
- * own conclusion. `"pending"` and `"failure"` pass through unchanged: they
- * already cannot unlock merge-ready dispatch on their own, so neither trust
- * check has anything to add for those two conclusions.
+ * A completed, green-conclusion run that fails either trust check - a
+ * tampered governance workflow file, an untouched workflow file alongside a
+ * tampered decision-path file, or unprovably-complete changed-file evidence
+ * - is reported as `"untrusted"` instead of `"success"`, regardless of the
+ * run's own conclusion. `"pending"` and `"failure"` pass through unchanged:
+ * they already cannot unlock merge-ready dispatch on their own, so neither
+ * trust check has anything to add for those two conclusions.
+ *
+ * DE-0010-R1 cycle 3 (final): `workflowFileUnavailable` and
+ * `changedFilePathsUnavailable` let the caller (scripts/run-autonomy-
+ * supervisor.mjs) distinguish a genuine content mismatch or a genuinely
+ * missing/absent file (still folded into `"untrusted"` above - these are
+ * real, actionable fail-closed evidence) from a transient read failure that
+ * proves nothing either way - a network error, GitHub secondary rate
+ * limiting, or a 5xx response fetching the pull request's copy of the
+ * workflow file or its compare diff. Before this cycle, both wiring
+ * functions (`fetchFileContentAtRef`, `fetchChangedFilePaths`) collapsed
+ * every error into the same `null`/missing-array shape this function
+ * already treats as tamper evidence, so a transient blip reported a real
+ * PR's governance evidence as `"untrusted"` -> `ci_failed` in
+ * supervisor-policy.mjs, consuming one of that PR's finite remediation-cycle
+ * attempts and triggering an unwarranted Workspace Agent dispatch for
+ * nothing the PR actually did. When either flag is set (and neither trust
+ * check independently proves an actual mismatch/decision-path edit, which
+ * always takes priority as definitive evidence), this function instead
+ * reports `"unavailable"`, which supervisor-policy.mjs treats exactly like
+ * `"pending"`: skip this cycle, dispatch nothing, spend no budget.
  */
-export function evaluateGovernanceEvidence({ workflowRuns, headSha, workflowFileTrust, changedFilePaths }) {
+export function evaluateGovernanceEvidence({
+  workflowRuns,
+  headSha,
+  workflowFileTrust,
+  workflowFileUnavailable = false,
+  changedFilePaths,
+  changedFilePathsUnavailable = false,
+}) {
   const summary = summarizeGovernanceWorkflowRuns(workflowRuns, headSha);
   if (summary === null || summary.conclusion !== "success") return summary;
-  if (!isGovernanceWorkflowFileTrusted(workflowFileTrust ?? {})) {
+
+  const fileCheck = evaluateWorkflowFileCheck(workflowFileTrust, workflowFileUnavailable);
+  const changedFilesCheck = evaluateChangedFilesCheck(changedFilePaths, changedFilePathsUnavailable);
+
+  if (fileCheck === "untrusted" || changedFilesCheck === "untrusted") {
     return { headSha, conclusion: "untrusted" };
   }
-  if (
-    !Array.isArray(changedFilePaths) ||
-    changedFilePaths.length >= CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP ||
-    changedFilePaths.some(isGovernanceDecisionPathFile)
-  ) {
-    return { headSha, conclusion: "untrusted" };
+  if (fileCheck === "unavailable" || changedFilesCheck === "unavailable") {
+    return { headSha, conclusion: "unavailable" };
   }
   return summary;
 }

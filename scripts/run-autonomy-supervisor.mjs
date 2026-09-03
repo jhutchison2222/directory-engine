@@ -41,7 +41,9 @@ async function githubRequest(token, path, init = {}) {
     },
   });
   if (!response.ok) {
-    throw new Error(`GitHub API ${init.method ?? "GET"} ${path} failed with status ${response.status}`);
+    const error = new Error(`GitHub API ${init.method ?? "GET"} ${path} failed with status ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -127,35 +129,55 @@ function buildCommentsForVerdicts(comments) {
  * network call for it. Both autonomy workflows always check out the
  * repository's default branch (never a PR head or merge ref) before
  * invoking this script - see docs/automation/autonomy-supervisor.md - so
- * the local checkout already *is* the trusted default-branch content. A
- * read failure (the file does not exist locally, e.g. before this pull
- * request first merges - see the bootstrap note in
- * docs/automation/autonomy-supervisor.md) fails closed to `null`, which
- * `isGovernanceWorkflowFileTrusted` in supervisor-ci.mjs never treats as
- * trusted.
+ * the local checkout already *is* the trusted default-branch content.
+ *
+ * DE-0010-R1 cycle 3 (final): returns `{ content, unavailable }` rather than
+ * a bare `content | null`, distinguishing two very different read failures.
+ * `ENOENT` (the file does not exist locally, e.g. before this pull request
+ * first merges - see the bootstrap note in docs/automation/autonomy-
+ * supervisor.md) is a genuine, meaningful absence: `unavailable: false`, and
+ * `content: null` still fails closed via `isGovernanceWorkflowFileTrusted`
+ * in supervisor-ci.mjs exactly as before. Any other local read error (a
+ * permission error, a disk I/O error) proves nothing about the file's
+ * actual content - it is a local infrastructure problem, not tamper
+ * evidence - so it is reported as `unavailable: true` instead, which
+ * evaluateGovernanceEvidence folds into a non-dispatching `"unavailable"`
+ * conclusion rather than the budget-consuming `"untrusted"` one.
  */
 async function readDefaultBranchGovernanceWorkflowFile() {
   try {
-    return await readFile(GOVERNANCE_WORKFLOW_PATH, "utf8");
-  } catch {
-    return null;
+    return { content: await readFile(GOVERNANCE_WORKFLOW_PATH, "utf8"), unavailable: false };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { content: null, unavailable: false };
+    return { content: null, unavailable: true };
   }
 }
 
 /**
  * Fetches the exact byte content of one file at one exact ref via GitHub's
- * Contents API, decoding it from the API's base64 encoding. Fails closed to
- * `null` on any error (missing file, API error, unexpected shape) rather
- * than throwing - a pull request that cannot be read is never trusted by
- * default.
+ * Contents API, decoding it from the API's base64 encoding.
+ *
+ * DE-0010-R1 cycle 3 (final): returns `{ content, unavailable }` rather than
+ * a bare `content | null`. A 404 (the file genuinely does not exist at this
+ * ref) is real, actionable evidence: `unavailable: false`, `content: null`,
+ * still fails closed via `isGovernanceWorkflowFileTrusted` exactly as
+ * before. Any other failure - a network error, a timeout, GitHub secondary
+ * rate limiting, a 5xx response, or an unexpected response shape - proves
+ * nothing about the pull request's actual content, so it is reported as
+ * `unavailable: true` instead, which evaluateGovernanceEvidence folds into a
+ * non-dispatching `"unavailable"` conclusion rather than the
+ * budget-consuming `"untrusted"` one. A pull request whose evidence
+ * genuinely cannot be read is still never trusted by default either way -
+ * only the *consequence* (skip vs. dispatch-and-spend-budget) differs.
  */
 async function fetchFileContentAtRef(token, owner, repo, path, ref) {
   try {
     const data = await githubRequest(token, `/repos/${owner}/${repo}/contents/${path}?ref=${ref}`);
-    if (typeof data?.content !== "string" || data.encoding !== "base64") return null;
-    return Buffer.from(data.content, "base64").toString("utf8");
-  } catch {
-    return null;
+    if (typeof data?.content !== "string" || data.encoding !== "base64") return { content: null, unavailable: false };
+    return { content: Buffer.from(data.content, "base64").toString("utf8"), unavailable: false };
+  } catch (error) {
+    if (error?.status === 404) return { content: null, unavailable: false };
+    return { content: null, unavailable: true };
   }
 }
 
@@ -178,19 +200,31 @@ async function fetchFileContentAtRef(token, owner, repo, path, ref) {
  * supervisor-ci.mjs treats any list at or above that same 300-file cap as
  * unprovably incomplete and fails closed to `"untrusted"`, so an oversized
  * comparison can never be mistaken for a complete, trustworthy one.
+ *
+ * DE-0010-R1 cycle 3 (final): returns `{ paths, unavailable }` rather than a
+ * bare `paths | null`. A 404 (e.g. the recorded base ref no longer exists)
+ * is real, actionable evidence: `unavailable: false`, `paths: null`, still
+ * fails closed via evaluateGovernanceEvidence's missing-array check exactly
+ * as before. Any other failure - network error, timeout, secondary rate
+ * limiting, a 5xx, or an unexpected response shape - proves nothing about
+ * the pull request's actual diff, so it is reported as `unavailable: true`
+ * instead, which evaluateGovernanceEvidence folds into a non-dispatching
+ * `"unavailable"` conclusion rather than the budget-consuming `"untrusted"`
+ * one.
  */
 async function fetchChangedFilePaths(token, owner, repo, base, headSha) {
   try {
     const data = await githubRequest(token, `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${headSha}`);
-    if (!Array.isArray(data?.files)) return null;
+    if (!Array.isArray(data?.files)) return { paths: null, unavailable: false };
     const paths = [];
     for (const file of data.files) {
       if (typeof file?.filename === "string") paths.push(file.filename);
       if (typeof file?.previous_filename === "string") paths.push(file.previous_filename);
     }
-    return paths;
-  } catch {
-    return null;
+    return { paths, unavailable: false };
+  } catch (error) {
+    if (error?.status === 404) return { paths: null, unavailable: false };
+    return { paths: null, unavailable: true };
   }
 }
 
@@ -201,14 +235,14 @@ function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
     now: new Date(),
 
     async listPullRequests() {
-      const [pulls, defaultBranchGovernanceWorkflowContent] = await Promise.all([
+      const [pulls, defaultBranchGovernanceWorkflowFile] = await Promise.all([
         githubPaginated(token, `${GITHUB_API}/repos/${owner}/${repo}/pulls?state=open&per_page=100`, (page) => page),
         readDefaultBranchGovernanceWorkflowFile(),
       ]);
       const snapshots = [];
       for (const pull of pulls) {
         const headSha = pull.head.sha;
-        const [workflowRuns, reviews, comments, headGovernanceWorkflowContent, changedFilePaths] = await Promise.all([
+        const [workflowRuns, reviews, comments, headGovernanceWorkflowFile, changedFileEvidence] = await Promise.all([
           githubPaginated(
             token,
             `${GITHUB_API}/repos/${owner}/${repo}/actions/runs?head_sha=${headSha}&per_page=100`,
@@ -236,10 +270,13 @@ function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
             workflowRuns: workflowRuns.map(normalizeWorkflowRun),
             headSha,
             workflowFileTrust: {
-              headContent: headGovernanceWorkflowContent,
-              defaultBranchContent: defaultBranchGovernanceWorkflowContent,
+              headContent: headGovernanceWorkflowFile.content,
+              defaultBranchContent: defaultBranchGovernanceWorkflowFile.content,
             },
-            changedFilePaths,
+            workflowFileUnavailable:
+              headGovernanceWorkflowFile.unavailable || defaultBranchGovernanceWorkflowFile.unavailable,
+            changedFilePaths: changedFileEvidence.paths,
+            changedFilePathsUnavailable: changedFileEvidence.unavailable,
           }),
           ownerVerdictEvents: buildOwnerVerdictEvents({
             ownerLogin,

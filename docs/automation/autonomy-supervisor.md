@@ -304,15 +304,46 @@ under `scripts/lib/`:
   previously-unlisted variant (e.g. `vitest.workspace.ts`, which this
   repository does not currently use) can no longer evade the check.
 
-  A same-name/path run whose workflow file does not match, whose content
-  could not be read on either side, whose decision-path diff could not be
-  read or is too large to be trusted as complete, or which touches any
+  **DE-0010-R1 cycle 3 (final): omitted `.json` extension, and evidence
+  unavailability vs. tampering.** Two further gaps closed. First, Vitest's
+  own workspace/projects documentation
+  (https://v2.vitest.dev/guide/workspace.html) lists `.json` as a supported
+  extension for `vitest.workspace`/`vitest.projects` specifically (unlike
+  `vitest.config`/`vite.config`, which have no JSON form); the config
+  pattern now covers `vitest.workspace.json`/`vitest.projects.json` too.
+  Second, the wiring layer (`scripts/run-autonomy-supervisor.mjs`) had
+  collapsed every read failure - a genuine missing/mismatched file *and* a
+  transient network error, GitHub secondary rate limit, or 5xx - into the
+  same `null`/missing-array shape `evaluateGovernanceEvidence` already
+  treated as tamper evidence (`"untrusted"`), which `supervisor-policy.mjs`
+  dispatches exactly like a real CI failure - spending one of a pull
+  request's finite remediation-cycle attempts and triggering an unwarranted
+  Workspace Agent dispatch for an availability blip the pull request had no
+  part in. `readDefaultBranchGovernanceWorkflowFile`, `fetchFileContentAtRef`,
+  and `fetchChangedFilePaths` now each return a tagged `{ content/paths,
+  unavailable }` result: a genuine absence (a local `ENOENT`, or a `404`
+  from GitHub) is still real, actionable evidence (`unavailable: false`,
+  still fails closed to `"untrusted"` when reported as a mismatch/missing
+  comparison); anything else (network throw, timeout, rate limit, 5xx) is
+  `unavailable: true`. `evaluateGovernanceEvidence` folds this into a new
+  `"unavailable"` conclusion - but only when neither trust check
+  independently proves a real mismatch or decision-path edit first, since
+  definitive tamper evidence must never be softened by an unrelated
+  availability problem elsewhere. `supervisor-policy.mjs` treats
+  `"unavailable"` exactly like `"pending"`: skip this cycle, dispatch
+  nothing, spend no budget.
+
+  A same-name/path run whose workflow file does not match, whose decision-
+  path diff is too large to be trusted as complete, or which touches any
   governance decision-path file (fixed file, `scripts/`/`test/` directory,
   or recognized config/workspace variant), is reported as `"untrusted"`
   instead of `"success"`, and `supervisor-policy.mjs` treats `"untrusted"`
   exactly like `"failure"`: it can never reach the merge-ready branch,
   regardless of the run's own conclusion or of any owner ACCEPTED verdict
-  recorded at that same head.
+  recorded at that same head. A run whose evidence could not be read this
+  cycle for reasons unrelated to the pull request's own content is instead
+  reported as `"unavailable"` and skipped with no dispatch, as described
+  above.
 
   **Trust boundary.** Ordinary application code under `src/`, documentation,
   and project state/fixtures are deliberately *not* part of the governance
@@ -410,6 +441,25 @@ evidence differently:
   marker's harmless-decoration character class alongside bold/italic/
   heading markers; it has been removed, so a line beginning with `>` can
   never be mistaken for a standalone assertion.
+  DE-0010-R1 cycle 3 (final): the blockquote fix only closed one of
+  GitHub's three ways to render a line as quoted example text - a
+  **fenced** (```` ``` ````) or **4-space/tab-indented** ACCEPTED line still
+  matched, because the decoration class's `\s` consumed the newline
+  separating a fence delimiter from the marker line, and plain leading
+  whitespace of any length (including CommonMark's 4-space indented-code
+  threshold) was already part of that class. The decoration class is now
+  restricted to horizontal whitespace only (space/tab; no longer `\s`), so
+  it can never bridge across a line boundary, and a new
+  `neutralizeQuotedCodeLines` pre-pass blanks out fenced and indented code
+  lines before the ACCEPTED marker is ever matched, so an owner pasting a
+  stale/rejected ACCEPTED line inside a code block to discuss it can never
+  itself create a real verdict - only a genuinely unquoted marker line
+  still matches. This fix is deliberately scoped to the ACCEPTED marker
+  only: the REJECTED/SUPERSEDED/REMEDIATION_REQUESTED markers still match
+  inside quoted code (a pre-existing, fail-closed-direction gap - a quoted
+  blocking marker incorrectly matching is conservative, not an escalation)
+  and are left as documented, deferred, non-blocking behavior rather than
+  risk changing their matching semantics in this cycle.
 - A **formal PR review** is first excluded entirely if its native state is
   `DISMISSED` or `PENDING`, and otherwise counts *only* via its own
   immutable native GitHub verdict (`APPROVED` -> accepted,
