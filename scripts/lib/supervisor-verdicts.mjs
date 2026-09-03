@@ -57,9 +57,9 @@ import { isUneditedProvenance } from "./supervisor-provenance.mjs";
  * word "accepted" elsewhere in a sentence could all still match and be
  * misread as acceptance. Rather than enumerate more negations, the ACCEPTED
  * marker is now anchored to require a whole standalone line: once optional,
- * letter-free Markdown decoration (bold/italic markers, blockquote/heading/
- * bullet markers, backticks/quotes, whitespace) is stripped from each end of
- * a line, the remainder must read exactly `ACCEPTED — exact head <sha>`. Any
+ * letter-free Markdown decoration (bold/italic markers, heading/bullet
+ * markers, backticks/quotes, whitespace) is stripped from each end of a
+ * line, the remainder must read exactly `ACCEPTED — exact head <sha>`. Any
  * literal word before "ACCEPTED" on that line - a negation, a qualifier, or
  * ordinary prose - contains letters, which the decoration class excludes, so
  * the line-start anchor rejects the whole line rather than merely a
@@ -67,6 +67,32 @@ import { isUneditedProvenance } from "./supervisor-provenance.mjs";
  * REJECTED/SUPERSEDED/remediation markers below are unchanged and are still
  * checked first, so blocking evidence combined with an accepted-looking
  * clause in the same body still resolves to the blocking verdict.
+ *
+ * DE-0010-R1: the decoration class above originally also stripped the
+ * Markdown blockquote marker `>`, on the theory that it was harmless
+ * rendering decoration like bold/italic. It is not: a blockquote is how
+ * GitHub renders a *quoted* line - a reply quoting someone else's earlier
+ * comment, or the owner quoting a rejected/superseded draft of a marker
+ * while discussing it - and quoting a line is not the same act as asserting
+ * it. `> ACCEPTED — exact head <sha>` must never itself create acceptance,
+ * regardless of who posted the quoting comment or whether the quoted head
+ * matches. `>` is therefore no longer part of LINE_DECORATION, so any line
+ * beginning with a blockquote marker can never satisfy the standalone
+ * ACCEPTED anchor; only a genuinely unquoted marker line still matches.
+ *
+ * DE-0010-R1 cycle 3 (final): the blockquote fix only closed one of
+ * GitHub's three ways to render a line as quoted example text rather than
+ * an assertion. A fenced (```) or 4-space/tab-indented ACCEPTED line was
+ * still classified as real acceptance, because LINE_DECORATION's `\s`
+ * matched the newline separating a fence delimiter from the marker line
+ * (letting decoration "eat through" the fence), and because plain leading
+ * whitespace was already part of LINE_DECORATION regardless of how much of
+ * it there was (so 4+ leading spaces - CommonMark's indented-code
+ * threshold - stripped just like ordinary line-start padding). Both gaps
+ * are closed below: LINE_DECORATION is now restricted to horizontal
+ * whitespace only (see its own comment), and neutralizeQuotedCodeLines
+ * blanks out fenced/indented code lines before the ACCEPTED marker is ever
+ * matched against a body.
  */
 
 export const OWNER_VERDICT_KINDS = Object.freeze({
@@ -99,14 +125,27 @@ const REMEDIATION_MARKER = new RegExp(
   "i",
 );
 // Letter-free Markdown/whitespace decoration that may harmlessly wrap a
-// standalone ACCEPTED marker line: emphasis markers, blockquote/heading/
-// bullet markers, backticks/quotes around a code-span SHA, and plain
-// whitespace. Because it contains no letters, any negated or qualified
-// phrase ("NOT YET ACCEPTED", "NEVER ACCEPTED", "NON-ACCEPTED",
-// "UN-ACCEPTED") or ordinary prose preceding the word "ACCEPTED" can never
-// be consumed by this class, so the line-start anchor below can never reach
-// past it to the literal "ACCEPTED" token.
-const LINE_DECORATION = "[\\s*_>#`'\"-]*";
+// standalone ACCEPTED marker line: emphasis markers, heading/bullet markers,
+// backticks/quotes around a code-span SHA, and plain horizontal whitespace.
+// Because it contains no letters, any negated or qualified phrase ("NOT YET
+// ACCEPTED", "NEVER ACCEPTED", "NON-ACCEPTED", "UN-ACCEPTED") or ordinary
+// prose preceding the word "ACCEPTED" can never be consumed by this class,
+// so the line-start anchor below can never reach past it to the literal
+// "ACCEPTED" token. `>` (the Markdown blockquote marker) is deliberately
+// excluded: a blockquoted line is a *quoted* line, not an assertion, and
+// must never satisfy this marker regardless of what it quotes.
+//
+// DE-0010-R1 cycle 3: deliberately uses ` \t` (horizontal whitespace only),
+// not `\s`. `\s` also matches `\n`, which let this decoration class consume
+// an entire fenced-code delimiter line (and the newline separating it from
+// the marker line) so that a ```-fenced ACCEPTED line still matched the
+// line-start/line-end anchors below - the same "quoting is not asserting"
+// gap the blockquote fix closed, reopened via a sibling GitHub quoting
+// mechanism. Restricting decoration to a single line means it can never
+// bridge across a line boundary on its own; neutralizeQuotedCodeLines below
+// closes the rest of the gap (a fenced/indented ACCEPTED line with no
+// decoration on its own line at all).
+const LINE_DECORATION = "[ \\t*_#`'\"-]*";
 
 // The only pattern that can ever create an ACCEPTED verdict: a standalone
 // marker line that, once LINE_DECORATION is stripped from each end, reads
@@ -118,6 +157,67 @@ const ACCEPTED_MARKER = new RegExp(
   `^${LINE_DECORATION}ACCEPTED\\s*[—-]\\s*exact head${HEAD_SHA_CAPTURE}${LINE_DECORATION}$`,
   "im",
 );
+
+// Matches a fenced-code delimiter line under CommonMark's fenced-code-block
+// rule: 0-3 leading spaces, then 3+ backticks or 3+ tildes (an optional
+// trailing "info string", e.g. ```js, is irrelevant to open/close matching
+// and is not captured).
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
+
+// Matches an indented-code line under CommonMark's indented-code-block rule:
+// 4+ leading spaces or a leading tab.
+const INDENTED_CODE_LINE = /^(?: {4}|\t)/;
+
+function isFenceClose(line, fenceChar, fenceLength) {
+  const trimmed = line.trim();
+  if (trimmed.length < fenceLength) return false;
+  for (const char of trimmed) {
+    if (char !== fenceChar) return false;
+  }
+  return true;
+}
+
+/**
+ * Blanks out every line GitHub would render as code - fenced code block
+ * lines (both delimiters and everything between them) and indented code
+ * block lines (4+ leading spaces or a leading tab) - before the ACCEPTED
+ * marker is matched against a comment body. This is what makes "quoting is
+ * not asserting" hold for GitHub's other two code-quoting mechanisms, not
+ * only the blockquote (`>`) form the first DE-0010-R1 cycle closed: an owner
+ * pasting a stale/rejected ACCEPTED line inside ```backticks``` or a
+ * 4-space-indented block to discuss it must never itself create a real
+ * verdict. Line count and the content of every non-code line are preserved
+ * exactly, so a genuine unquoted marker line elsewhere in the same body
+ * still matches at its real position. Deliberately applied only ahead of the
+ * ACCEPTED_MARKER match, not the REJECTED/SUPERSEDED/REMEDIATION_REQUESTED
+ * markers below: those are blocking markers, so a quoted occurrence
+ * incorrectly matching is a conservative (fail-closed) false positive, not a
+ * new escalation, and is left as documented pre-existing behavior rather
+ * than risk changing their matching semantics in this cycle.
+ */
+function neutralizeQuotedCodeLines(body) {
+  const lines = body.split("\n");
+  let fenceChar = null;
+  let fenceLength = 0;
+  const neutralized = lines.map((line) => {
+    if (fenceChar) {
+      if (isFenceClose(line, fenceChar, fenceLength)) {
+        fenceChar = null;
+        fenceLength = 0;
+      }
+      return "";
+    }
+    const openMatch = line.match(FENCE_OPEN);
+    if (openMatch) {
+      fenceChar = openMatch[1][0];
+      fenceLength = openMatch[1].length;
+      return "";
+    }
+    if (INDENTED_CODE_LINE.test(line)) return "";
+    return line;
+  });
+  return neutralized.join("\n");
+}
 
 /**
  * Classifies one owner-authored comment or review body against the explicit
@@ -142,7 +242,7 @@ export function classifyOwnerCommentBody(body) {
   if (rejected) return { kind: OWNER_VERDICT_KINDS.REJECTED, headSha: rejected[1].toLowerCase() };
   const remediation = body.match(REMEDIATION_MARKER);
   if (remediation) return { kind: OWNER_VERDICT_KINDS.REMEDIATION_REQUESTED, headSha: remediation[1].toLowerCase() };
-  const accepted = body.match(ACCEPTED_MARKER);
+  const accepted = neutralizeQuotedCodeLines(body).match(ACCEPTED_MARKER);
   if (accepted) return { kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: accepted[1].toLowerCase() };
   return null;
 }

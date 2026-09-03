@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP,
   GOVERNANCE_WORKFLOW_NAME,
   GOVERNANCE_WORKFLOW_PATH,
+  evaluateGovernanceEvidence,
+  isGovernanceDecisionPathFile,
+  isGovernanceWorkflowFileTrusted,
   isGovernanceWorkflowRun,
   summarizeGovernanceWorkflowRuns,
 } from "../scripts/lib/supervisor-ci.mjs";
@@ -174,5 +178,357 @@ describe("summarizeGovernanceWorkflowRuns", () => {
       HEAD_A,
     );
     expect(forgedAlongsideReal).toEqual({ headSha: HEAD_A, conclusion: "failure" });
+  });
+});
+
+const DEFAULT_BRANCH_WORKFLOW_CONTENT = "name: Project governance\non:\n  pull_request:\n";
+
+describe("isGovernanceWorkflowFileTrusted", () => {
+  it("trusts only byte-identical content on both sides", () => {
+    expect(
+      isGovernanceWorkflowFileTrusted({
+        headContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+        defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+      }),
+    ).toBe(true);
+  });
+
+  it("DE-0010-R1 regression: never trusts a tampered governance workflow file, even by one character", () => {
+    const tampered = `${DEFAULT_BRANCH_WORKFLOW_CONTENT}  push:\n`;
+    expect(
+      isGovernanceWorkflowFileTrusted({ headContent: tampered, defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT }),
+    ).toBe(false);
+  });
+
+  it("fails closed when either side is missing, unreadable, or empty", () => {
+    expect(isGovernanceWorkflowFileTrusted({ headContent: null, defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT })).toBe(
+      false,
+    );
+    expect(isGovernanceWorkflowFileTrusted({ headContent: DEFAULT_BRANCH_WORKFLOW_CONTENT, defaultBranchContent: null })).toBe(
+      false,
+    );
+    expect(isGovernanceWorkflowFileTrusted({ headContent: "", defaultBranchContent: "" })).toBe(false);
+    expect(isGovernanceWorkflowFileTrusted({})).toBe(false);
+  });
+});
+
+describe("isGovernanceDecisionPathFile", () => {
+  it("DE-0010-R1 cycle 2: matches the fixed decision-path files exactly", () => {
+    expect(isGovernanceDecisionPathFile(GOVERNANCE_WORKFLOW_PATH)).toBe(true);
+    expect(isGovernanceDecisionPathFile("package.json")).toBe(true);
+    expect(isGovernanceDecisionPathFile("tsconfig.json")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vitest.config.ts")).toBe(true);
+  });
+
+  it("DE-0010-R1 cycle 2: matches every file under scripts/ or test/, including files added by the pull request itself", () => {
+    expect(isGovernanceDecisionPathFile("scripts/validate-project-governance.mjs")).toBe(true);
+    expect(isGovernanceDecisionPathFile("scripts/lib/supervisor-ci.mjs")).toBe(true);
+    expect(isGovernanceDecisionPathFile("scripts/lib/brand-new-helper-not-yet-invented.mjs")).toBe(true);
+    expect(isGovernanceDecisionPathFile("test/supervisor-ci.test.mjs")).toBe(true);
+    expect(isGovernanceDecisionPathFile("test/brand-new-test-file.test.mjs")).toBe(true);
+  });
+
+  it("DE-0010-R1 cycle 2: never matches ordinary application code, docs, or project state", () => {
+    expect(isGovernanceDecisionPathFile("src/index.ts")).toBe(false);
+    expect(isGovernanceDecisionPathFile("README.md")).toBe(false);
+    expect(isGovernanceDecisionPathFile("project/current-state.json")).toBe(false);
+    expect(isGovernanceDecisionPathFile("docs/automation/autonomy-supervisor.md")).toBe(false);
+    // A path that merely starts with the same characters as a decision-path
+    // directory, but is not actually inside it, must never match.
+    expect(isGovernanceDecisionPathFile("scripts-unrelated/evil.mjs")).toBe(false);
+  });
+
+  it("fails closed on non-string/empty input rather than throwing", () => {
+    expect(isGovernanceDecisionPathFile(null)).toBe(false);
+    expect(isGovernanceDecisionPathFile(undefined)).toBe(false);
+    expect(isGovernanceDecisionPathFile("")).toBe(false);
+  });
+
+  it("DE-0010-R1 cycle 3: matches every package-manager dependency-resolution input npm install can honor", () => {
+    expect(isGovernanceDecisionPathFile("package-lock.json")).toBe(true);
+    expect(isGovernanceDecisionPathFile("npm-shrinkwrap.json")).toBe(true);
+    expect(isGovernanceDecisionPathFile("yarn.lock")).toBe(true);
+  });
+
+  it("DE-0010-R1 cycle 3: matches every supported Vitest/Vite config and workspace filename variant, not only the one currently in use", () => {
+    // vitest.config.ts is already covered by the fixed-file list above; the
+    // point of this regression is the *other* recognized variants, which a
+    // pull request could add without ever touching vitest.config.ts itself.
+    expect(isGovernanceDecisionPathFile("vitest.config.mts")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vitest.config.js")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vitest.workspace.ts")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vitest.projects.ts")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vite.config.ts")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vite.config.mjs")).toBe(true);
+  });
+
+  it("DE-0010-R1 cycle 3: the config-variant pattern never matches an unrelated path that merely contains the same words", () => {
+    expect(isGovernanceDecisionPathFile("src/vitest.config.ts.md")).toBe(false);
+    expect(isGovernanceDecisionPathFile("docs/vite.config.ts.example")).toBe(false);
+    expect(isGovernanceDecisionPathFile("src/notvitest.config.ts")).toBe(false);
+  });
+
+  it("DE-0010-R1 cycle 3 (final): matches the .json extension Vitest's own workspace/projects docs support, which the prior pattern omitted", () => {
+    // https://v2.vitest.dev/guide/workspace.html documents vitest.workspace
+    // and vitest.projects as supporting ts/js/json specifically - unlike
+    // vitest.config/vite.config, which have no JSON form.
+    expect(isGovernanceDecisionPathFile("vitest.workspace.json")).toBe(true);
+    expect(isGovernanceDecisionPathFile("vitest.projects.json")).toBe(true);
+  });
+
+  it("DE-0010-R1 cycle 3 (final): does not extend the .json extension to vitest.config/vite.config, which have no supported JSON form", () => {
+    expect(isGovernanceDecisionPathFile("vitest.config.json")).toBe(false);
+    expect(isGovernanceDecisionPathFile("vite.config.json")).toBe(false);
+  });
+});
+
+describe("evaluateGovernanceEvidence", () => {
+  const SUCCESSFUL_RUN = [{ ...GOVERNANCE_RUN, status: "completed", conclusion: "success", startedAt: "2026-09-02T09:00:00Z" }];
+  const TRUSTED_WORKFLOW_FILE = {
+    headContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+    defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+  };
+
+  it("clean exact-head governance: a successful run with a trusted workflow file and only ordinary code changes reports success", () => {
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["src/index.ts", "docs/automation/autonomy-supervisor.md", "project/current-state.json"],
+    });
+    expect(result).toEqual({ headSha: HEAD_A, conclusion: "success" });
+  });
+
+  it("DE-0010-R1 cycle 1 regression: a pull request that tampers with its own governance workflow while producing a same-name/path success run is never trusted", () => {
+    const tamperedWorkflowContent = "name: Project governance\non:\n  pull_request:\njobs:\n  verify:\n    run: exit 0\n";
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: {
+        headContent: tamperedWorkflowContent,
+        defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT,
+      },
+      changedFilePaths: [GOVERNANCE_WORKFLOW_PATH],
+    });
+    expect(result).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("DE-0010-R1 cycle 1 regression: a stale or unreadable default-branch copy never lets a mismatched head pass as trusted", () => {
+    // The default-branch fetch failed (e.g. transient error, or this
+    // pull request predates the governance workflow file's existence) - the
+    // absence of a comparison target must never be treated as "nothing to
+    // compare against, so trust it".
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: DEFAULT_BRANCH_WORKFLOW_CONTENT, defaultBranchContent: null },
+      changedFilePaths: [],
+    });
+    expect(result).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("DE-0010-R1 cycle 2 regression: a same-repository pull request that keeps the governance workflow byte-identical but tampers with package.json is never trusted", () => {
+    // The exact attack Codex's exact-head review identified: the trusted,
+    // byte-identical workflow file still checks out and runs whatever
+    // `npm run test`/`typecheck`/`check:governance` resolve to via
+    // package.json's own scripts - a same-repository pull request could
+    // replace those with no-ops and still land a clean, name+path-matching,
+    // byte-trusted "success" run.
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["package.json"],
+    });
+    expect(result).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("DE-0010-R1 cycle 2 regression: a same-repository pull request that keeps the governance workflow byte-identical but tampers with the governance validator or its transitive helpers is never trusted", () => {
+    const validatorTampered = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["scripts/validate-project-governance.mjs"],
+    });
+    expect(validatorTampered).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+
+    const transitiveHelperTampered = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["scripts/lib/schema-fail-closed.mjs"],
+    });
+    expect(transitiveHelperTampered).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("DE-0010-R1 cycle 2 regression: tampering with the TypeScript or vitest test configuration is never trusted, even with an unrelated other file also changed", () => {
+    const tsconfigTampered = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["src/index.ts", "tsconfig.json"],
+    });
+    expect(tsconfigTampered).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+
+    const vitestConfigTampered = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["vitest.config.ts"],
+    });
+    expect(vitestConfigTampered).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("DE-0010-R1 cycle 2 regression: a missing or unreadable changed-file diff fails closed rather than defaulting to trusted", () => {
+    const missing = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: null,
+    });
+    expect(missing).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+
+    const undefinedPaths = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+    });
+    expect(undefinedPaths).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("never downgrades a pending or failing run: neither trust check has anything to add for those two conclusions", () => {
+    const pending = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "in_progress", conclusion: null, startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: "tampered", defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT },
+      changedFilePaths: ["package.json"],
+    });
+    expect(pending).toEqual({ headSha: HEAD_A, conclusion: "pending" });
+
+    const failing = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "completed", conclusion: "failure", startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: "tampered", defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT },
+      changedFilePaths: ["package.json"],
+    });
+    expect(failing).toEqual({ headSha: HEAD_A, conclusion: "failure" });
+  });
+
+  it("returns null (awaiting_ci) when no governance run exists yet at this head, regardless of either trust check", () => {
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: [],
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["package.json"],
+    });
+    expect(result).toBeNull();
+  });
+
+  it("DE-0010-R1 cycle 3 regression: a changed-file list at or above GitHub's compare-API completeness cap is never trusted, even with no visible decision-path file", () => {
+    // The exact bypass exact-head review identified: a pull request touching
+    // more than 300 files could place a decision-path edit past the compare
+    // API's 300-file cap, where it would never appear in this list at all.
+    const atCap = Array.from({ length: CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP }, (_, index) => `src/file-${index}.ts`);
+    const result = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: atCap,
+    });
+    expect(result).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+
+    const belowCap = Array.from(
+      { length: CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP - 1 },
+      (_, index) => `src/file-${index}.ts`,
+    );
+    const trusted = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: belowCap,
+    });
+    expect(trusted).toEqual({ headSha: HEAD_A, conclusion: "success" });
+  });
+
+  it("DE-0010-R1 cycle 3 regression: a same-repository pull request that keeps the governance workflow byte-identical but adds a lockfile or an unlisted Vitest/Vite config variant is never trusted", () => {
+    const lockfileAdded = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["package-lock.json"],
+    });
+    expect(lockfileAdded).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+
+    const workspaceConfigAdded = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: ["vitest.workspace.ts"],
+    });
+    expect(workspaceConfigAdded).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("DE-0010-R1 cycle 3 (final) regression: a transient failure reading the workflow file or the changed-file diff is reported as unavailable, not untrusted", () => {
+    const workflowFileUnavailable = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: null, defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT },
+      workflowFileUnavailable: true,
+      changedFilePaths: ["src/index.ts"],
+    });
+    expect(workflowFileUnavailable).toEqual({ headSha: HEAD_A, conclusion: "unavailable" });
+
+    const changedFilesUnavailable = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: null,
+      changedFilePathsUnavailable: true,
+    });
+    expect(changedFilesUnavailable).toEqual({ headSha: HEAD_A, conclusion: "unavailable" });
+  });
+
+  it("DE-0010-R1 cycle 3 (final) regression: definitive tamper/decision-path evidence always wins over an unrelated unavailable signal", () => {
+    // A genuine mismatch or decision-path edit is real, actionable evidence
+    // - it must never be softened to "unavailable" merely because some
+    // other, independent piece of evidence also could not be read this
+    // cycle.
+    const tamperedFileWithUnrelatedUnavailableDiff = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: "tampered", defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT },
+      changedFilePaths: null,
+      changedFilePathsUnavailable: true,
+    });
+    expect(tamperedFileWithUnrelatedUnavailableDiff).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+
+    const decisionPathEditWithUnrelatedUnavailableFile = evaluateGovernanceEvidence({
+      workflowRuns: SUCCESSFUL_RUN,
+      headSha: HEAD_A,
+      workflowFileTrust: { headContent: null, defaultBranchContent: DEFAULT_BRANCH_WORKFLOW_CONTENT },
+      workflowFileUnavailable: true,
+      changedFilePaths: ["package.json"],
+    });
+    expect(decisionPathEditWithUnrelatedUnavailableFile).toEqual({ headSha: HEAD_A, conclusion: "untrusted" });
+  });
+
+  it("DE-0010-R1 cycle 3 (final) regression: an unavailable signal never downgrades a pending or failing run", () => {
+    const pending = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "in_progress", conclusion: null, startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      workflowFileUnavailable: true,
+      changedFilePaths: ["src/index.ts"],
+    });
+    expect(pending).toEqual({ headSha: HEAD_A, conclusion: "pending" });
+
+    const failing = evaluateGovernanceEvidence({
+      workflowRuns: [{ ...GOVERNANCE_RUN, status: "completed", conclusion: "failure", startedAt: "2026-09-02T09:00:00Z" }],
+      headSha: HEAD_A,
+      workflowFileTrust: TRUSTED_WORKFLOW_FILE,
+      changedFilePaths: null,
+      changedFilePathsUnavailable: true,
+    });
+    expect(failing).toEqual({ headSha: HEAD_A, conclusion: "failure" });
   });
 });

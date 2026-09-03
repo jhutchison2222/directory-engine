@@ -234,6 +234,133 @@ under `scripts/lib/`:
   same-repository pull request from forging acceptance by adding a second
   workflow file elsewhere in `.github/workflows/` with an identical
   human-readable `name:`.
+
+  **DE-0010-R1 cycle 1 (governance workflow-file trust rooting):** matching
+  the fixed name and path still only proves which workflow *file path*
+  produced a run, not which *content* GitHub loaded from that path - a
+  `pull_request`-triggered workflow's own YAML definition is loaded from the
+  pull request's own ref, so a same-repository pull request can rewrite
+  `.github/workflows/project-governance.yml` itself (e.g. replacing its
+  real steps with a trivial `exit 0`) and still produce a completed,
+  successful, name+path-matching run at its own exact head - the same
+  control-plane-loading gap documented above for the wake/supervisor split,
+  now closed for the governance workflow too. `evaluateGovernanceEvidence`
+  requires `isGovernanceWorkflowFileTrusted`: the exact bytes of the
+  governance workflow file at the pull request's head must match the
+  repository's default branch's copy (read directly from the local
+  checkout the supervisor workflow always makes of the default branch - see
+  "Architecture: the workflow split" above - not a separate, spoofable
+  network round trip) before a `"success"` conclusion is ever reported as
+  such.
+
+  **DE-0010-R1 cycle 2 (decision-path rooting):** byte-identity of the
+  workflow file alone is still insufficient - that trusted, unmodified YAML
+  checks out and executes whatever the pull request's own head defines for
+  `npm run check:governance`/`typecheck`/`test`, including `package.json`'s
+  own script definitions, `tsconfig.json`/`vitest.config.ts`, the governance
+  validator (`scripts/validate-project-governance.mjs`), and every
+  transitive helper under `scripts/` or `test/`. A same-repository pull
+  request could leave the workflow file byte-identical to `main` and still
+  weaken or neuter any of those, then land a genuinely successful,
+  byte-trusted run at its own exact head. `evaluateGovernanceEvidence`
+  additionally requires that `changedFilePaths` - every file path GitHub's
+  compare API (`base...head`) reports as different between the pull
+  request's own recorded base branch and its exact current head, fetched by
+  the wiring layer, never read from PR-supplied content - contains no file
+  matching `isGovernanceDecisionPathFile` (an exact match against
+  `GOVERNANCE_DECISION_PATH_FILES` - the workflow file, `package.json`,
+  `tsconfig.json`, `vitest.config.ts` - or a prefix match against
+  `GOVERNANCE_DECISION_PATH_DIRECTORIES` - every file under `scripts/` or
+  `test/`, including a file newly added by the pull request itself, since
+  the check is a directory-prefix rule rather than an enumerated list of
+  pre-existing files). This is a deliberately conservative, deterministic
+  reading of issue #29's minimum bar: rather than attempt to judge whether a
+  change to one of these files is malicious, a pull request that touches
+  *any* of them is unconditionally ineligible for a trusted `"success"`
+  conclusion, regardless of the workflow file's own byte-identity or the
+  run's own conclusion.
+
+  **DE-0010-R1 cycle 3 (evidence-completeness and toolchain-input
+  coverage):** two further deterministic bypasses of cycle 2's check
+  remained. First, GitHub's compare API caps a single comparison at 300
+  changed files; `changedFilePaths` was trusted as complete evidence even
+  above that cap, so a pull request touching more than 300 files could place
+  a decision-path edit past the cap, where it would never appear in the
+  returned list and would never be caught. `evaluateGovernanceEvidence` now
+  also fails closed to `"untrusted"` whenever `changedFilePaths.length` is at
+  or above `CHANGED_FILE_EVIDENCE_COMPLETENESS_CAP` (300) - a list that large
+  can no longer be trusted to be *complete*, regardless of what it does or
+  does not contain. Second, the fixed file set only protected the exact
+  filenames `package.json`/`tsconfig.json`/`vitest.config.ts`, but `npm
+  install` resolves dependencies through `package-lock.json`,
+  `npm-shrinkwrap.json`, or `yarn.lock` when present, and Vitest/Vite both
+  recognize several config/workspace filename variants and extensions
+  (`vitest.config`/`vitest.workspace`/`vitest.projects`/`vite.config`, each
+  in `.ts`/`.mts`/`.cts`/`.js`/`.mjs`/`.cjs`) capable of changing which tests
+  run or how - none of which the fixed list matched.
+  `GOVERNANCE_DECISION_PATH_FILES` now also lists the lock/shrinkwrap
+  inputs, and `GOVERNANCE_DECISION_PATH_CONFIG_PATTERN` matches every
+  supported extension of those four config/workspace basenames, so adding a
+  previously-unlisted variant (e.g. `vitest.workspace.ts`, which this
+  repository does not currently use) can no longer evade the check.
+
+  **DE-0010-R1 cycle 3 (final): omitted `.json` extension, and evidence
+  unavailability vs. tampering.** Two further gaps closed. First, Vitest's
+  own workspace/projects documentation
+  (https://v2.vitest.dev/guide/workspace.html) lists `.json` as a supported
+  extension for `vitest.workspace`/`vitest.projects` specifically (unlike
+  `vitest.config`/`vite.config`, which have no JSON form); the config
+  pattern now covers `vitest.workspace.json`/`vitest.projects.json` too.
+  Second, the wiring layer (`scripts/run-autonomy-supervisor.mjs`) had
+  collapsed every read failure - a genuine missing/mismatched file *and* a
+  transient network error, GitHub secondary rate limit, or 5xx - into the
+  same `null`/missing-array shape `evaluateGovernanceEvidence` already
+  treated as tamper evidence (`"untrusted"`), which `supervisor-policy.mjs`
+  dispatches exactly like a real CI failure - spending one of a pull
+  request's finite remediation-cycle attempts and triggering an unwarranted
+  Workspace Agent dispatch for an availability blip the pull request had no
+  part in. `readDefaultBranchGovernanceWorkflowFile`, `fetchFileContentAtRef`,
+  and `fetchChangedFilePaths` now each return a tagged `{ content/paths,
+  unavailable }` result: a genuine absence (a local `ENOENT`, or a `404`
+  from GitHub) is still real, actionable evidence (`unavailable: false`,
+  still fails closed to `"untrusted"` when reported as a mismatch/missing
+  comparison); anything else (network throw, timeout, rate limit, 5xx) is
+  `unavailable: true`. `evaluateGovernanceEvidence` folds this into a new
+  `"unavailable"` conclusion - but only when neither trust check
+  independently proves a real mismatch or decision-path edit first, since
+  definitive tamper evidence must never be softened by an unrelated
+  availability problem elsewhere. `supervisor-policy.mjs` treats
+  `"unavailable"` exactly like `"pending"`: skip this cycle, dispatch
+  nothing, spend no budget.
+
+  A same-name/path run whose workflow file does not match, whose decision-
+  path diff is too large to be trusted as complete, or which touches any
+  governance decision-path file (fixed file, `scripts/`/`test/` directory,
+  or recognized config/workspace variant), is reported as `"untrusted"`
+  instead of `"success"`, and `supervisor-policy.mjs` treats `"untrusted"`
+  exactly like `"failure"`: it can never reach the merge-ready branch,
+  regardless of the run's own conclusion or of any owner ACCEPTED verdict
+  recorded at that same head. A run whose evidence could not be read this
+  cycle for reasons unrelated to the pull request's own content is instead
+  reported as `"unavailable"` and skipped with no dispatch, as described
+  above.
+
+  **Trust boundary.** Ordinary application code under `src/`, documentation,
+  and project state/fixtures are deliberately *not* part of the governance
+  decision path, so an ordinary code change unrelated to
+  governance/typecheck/test enforcement still reaches a trusted `"success"`
+  conclusion when the workflow file is untouched, the changed-file evidence
+  is complete, and the run is genuinely green - otherwise no pull request
+  could ever become merge-ready automatically. This means a change to
+  `scripts/` or `test/` content that is itself legitimate (e.g. this
+  remediation cycle's own new regression tests), or a pull request that
+  legitimately needs to touch 300 or more files, is *also* reported
+  `"untrusted"`, the same as a malicious change would be - the automated
+  check cannot distinguish the two, by design, and intentionally falls back
+  to requiring a human owner's exact-head review and explicit `ACCEPTED`
+  verdict for any pull request that touches the decision path or is too
+  large to prove complete, rather than attempting a permissive but
+  judgment-based classification it cannot deterministically get right.
 - `supervisor-provenance.mjs` - the single fail-closed
   `isUneditedProvenance` check used everywhere a **comment** body is trusted
   as evidence (owner-verdict conversation comments, dispatch markers): both
@@ -306,6 +433,33 @@ evidence differently:
   comment (GitHub preserves the original author on an edit, so author
   identity alone is not proof the body is still what the owner wrote) is
   never trusted, regardless of the identity that appears to have authored it.
+  DE-0010-R1: a **blockquoted** ACCEPTED line (`> ACCEPTED — exact head
+  <sha>`, as GitHub renders a quoted reply or a quoted earlier draft) can
+  never satisfy this marker either, even from the owner's own trusted,
+  unedited comment - quoting a line is not the same act as asserting it.
+  The Markdown blockquote marker `>` was previously included in the
+  marker's harmless-decoration character class alongside bold/italic/
+  heading markers; it has been removed, so a line beginning with `>` can
+  never be mistaken for a standalone assertion.
+  DE-0010-R1 cycle 3 (final): the blockquote fix only closed one of
+  GitHub's three ways to render a line as quoted example text - a
+  **fenced** (```` ``` ````) or **4-space/tab-indented** ACCEPTED line still
+  matched, because the decoration class's `\s` consumed the newline
+  separating a fence delimiter from the marker line, and plain leading
+  whitespace of any length (including CommonMark's 4-space indented-code
+  threshold) was already part of that class. The decoration class is now
+  restricted to horizontal whitespace only (space/tab; no longer `\s`), so
+  it can never bridge across a line boundary, and a new
+  `neutralizeQuotedCodeLines` pre-pass blanks out fenced and indented code
+  lines before the ACCEPTED marker is ever matched, so an owner pasting a
+  stale/rejected ACCEPTED line inside a code block to discuss it can never
+  itself create a real verdict - only a genuinely unquoted marker line
+  still matches. This fix is deliberately scoped to the ACCEPTED marker
+  only: the REJECTED/SUPERSEDED/REMEDIATION_REQUESTED markers still match
+  inside quoted code (a pre-existing, fail-closed-direction gap - a quoted
+  blocking marker incorrectly matching is conservative, not an escalation)
+  and are left as documented, deferred, non-blocking behavior rather than
+  risk changing their matching semantics in this cycle.
 - A **formal PR review** is first excluded entirely if its native state is
   `DISMISSED` or `PENDING`, and otherwise counts *only* via its own
   immutable native GitHub verdict (`APPROVED` -> accepted,

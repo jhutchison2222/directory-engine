@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -16,9 +16,25 @@ import { fileURLToPath } from "node:url";
  * an untrusted PR head or merge ref), grants only the authorized
  * least-privilege permissions, and invokes only the one reviewed runner
  * script from that trusted checkout.
+ *
+ * DE-0010-R1: following the post-merge security findings that led to
+ * disabling both autonomy workflow files pending review (see
+ * docs/automation/autonomy-supervisor.md), this file is intentionally
+ * absent from every code-only remediation branch - a maintainer applies the
+ * exact reviewed YAML directly, as with every prior workflow-file change in
+ * this packet. These structural tests are skipped (never silently deleted)
+ * while the file is absent, and run again automatically once it is
+ * reinstated.
  */
 const WORKFLOW_PATH = fileURLToPath(new URL("../.github/workflows/autonomy-supervisor.yml", import.meta.url));
-const workflow = readFileSync(WORKFLOW_PATH, "utf8");
+const workflowFileExists = existsSync(WORKFLOW_PATH);
+const workflow = workflowFileExists ? readFileSync(WORKFLOW_PATH, "utf8") : "";
+
+describe.skipIf(workflowFileExists)("autonomy-supervisor.yml: workflow file intentionally absent", () => {
+  it("is pending maintainer-applied insertion of the reviewed YAML; structural tests below are skipped, not deleted", () => {
+    expect(workflowFileExists).toBe(false);
+  });
+});
 
 function extractTopLevelBlock(source, key) {
   const lines = source.split("\n");
@@ -33,7 +49,7 @@ function extractTopLevelBlock(source, key) {
   return blockLines.join("\n");
 }
 
-describe("autonomy-supervisor.yml: trigger surface", () => {
+describe.skipIf(!workflowFileExists)("autonomy-supervisor.yml: trigger surface", () => {
   it("preserves the scheduled recovery backstop and manual dispatch", () => {
     expect(workflow).toMatch(/cron:\s*"\*\/5 \* \* \* \*"/);
     expect(workflow).toMatch(/workflow_dispatch:/);
@@ -52,8 +68,8 @@ describe("autonomy-supervisor.yml: trigger surface", () => {
   });
 });
 
-describe("autonomy-supervisor.yml: least-privilege permissions", () => {
-  const permissions = extractTopLevelBlock(workflow, "permissions");
+describe.skipIf(!workflowFileExists)("autonomy-supervisor.yml: least-privilege permissions", () => {
+  const permissions = workflowFileExists ? extractTopLevelBlock(workflow, "permissions") : "";
 
   it("grants exactly the five authorized scopes", () => {
     expect(permissions).toMatch(/^\s*actions: read\s*$/m);
@@ -78,7 +94,7 @@ describe("autonomy-supervisor.yml: least-privilege permissions", () => {
   });
 });
 
-describe("autonomy-supervisor.yml: single non-overlapping concurrency group", () => {
+describe.skipIf(!workflowFileExists)("autonomy-supervisor.yml: single non-overlapping concurrency group", () => {
   it("never runs two evaluations concurrently and never cancels an in-flight one", () => {
     const concurrency = extractTopLevelBlock(workflow, "concurrency");
     expect(concurrency).toMatch(/group:\s*\S+/);
@@ -86,7 +102,7 @@ describe("autonomy-supervisor.yml: single non-overlapping concurrency group", ()
   });
 });
 
-describe("autonomy-supervisor.yml: trusted default-branch checkout before secret-bearing execution", () => {
+describe.skipIf(!workflowFileExists)("autonomy-supervisor.yml: trusted default-branch checkout before secret-bearing execution", () => {
   it("checks out the repository's default branch with persisted credentials disabled", () => {
     const checkoutIndex = workflow.indexOf("uses: actions/checkout@");
     expect(checkoutIndex).toBeGreaterThan(-1);
@@ -115,7 +131,7 @@ describe("autonomy-supervisor.yml: trusted default-branch checkout before secret
   });
 });
 
-describe("autonomy-supervisor.yml: credentials referenced by name only", () => {
+describe.skipIf(!workflowFileExists)("autonomy-supervisor.yml: credentials referenced by name only", () => {
   it("reads the agent id and token only from vars/secrets by name, never a literal value", () => {
     expect(workflow).toContain("${{ vars.CHATGPT_WORKSPACE_AGENT_ID }}");
     expect(workflow).toContain("${{ secrets.CHATGPT_WORKSPACE_AGENT_TOKEN }}");
