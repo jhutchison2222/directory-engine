@@ -17,3 +17,4 @@
     "The two DE-0010 workflow files (.github/workflows/autonomy-wake.yml and .github/workflows/autonomy-supervisor.yml) have needed maintainer-applied insertion for every substantive change throughout this packet, because the Claude GitHub App token used for git operations lacks the workflows permission; this is expected and not itself a defect. The exact reviewed YAML delta is always reported in full alongside the pushed code/tests/docs commit so a maintainer can apply it directly."
   ]
 }
+
