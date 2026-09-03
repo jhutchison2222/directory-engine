@@ -51,5 +51,4 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CHATGPT_WORKSPACE_AGENT_ID: ${{ vars.CHATGPT_WORKSPACE_AGENT_ID }}
           CHATGPT_WORKSPACE_AGENT_TOKEN: ${{ secrets.CHATGPT_WORKSPACE_AGENT_TOKEN }}
-          AUTONOMY_TRUSTED_BOT_LOGINS: ${{ vars.AUTONOMY_TRUSTED_BOT_LOGINS }}
         run: node scripts/run-autonomy-supervisor.mjs
