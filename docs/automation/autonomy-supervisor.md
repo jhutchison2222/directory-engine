@@ -233,29 +233,79 @@ under `scripts/lib/`:
   counts. Matching by path in addition to name is what stops a
   same-repository pull request from forging acceptance by adding a second
   workflow file elsewhere in `.github/workflows/` with an identical
-  human-readable `name:`. DE-0010-R1 (governance workflow-file trust
-  rooting): matching the fixed name and path still only proves which
-  workflow *file path* produced a run, not which *content* GitHub loaded
-  from that path - a `pull_request`-triggered workflow's own YAML
-  definition is loaded from the pull request's own ref, so a
-  same-repository pull request can rewrite
+  human-readable `name:`.
+
+  **DE-0010-R1 cycle 1 (governance workflow-file trust rooting):** matching
+  the fixed name and path still only proves which workflow *file path*
+  produced a run, not which *content* GitHub loaded from that path - a
+  `pull_request`-triggered workflow's own YAML definition is loaded from the
+  pull request's own ref, so a same-repository pull request can rewrite
   `.github/workflows/project-governance.yml` itself (e.g. replacing its
   real steps with a trivial `exit 0`) and still produce a completed,
   successful, name+path-matching run at its own exact head - the same
   control-plane-loading gap documented above for the wake/supervisor split,
   now closed for the governance workflow too. `evaluateGovernanceEvidence`
-  additionally requires `isGovernanceWorkflowFileTrusted`: the exact bytes
-  of the governance workflow file at the pull request's head must match the
+  requires `isGovernanceWorkflowFileTrusted`: the exact bytes of the
+  governance workflow file at the pull request's head must match the
   repository's default branch's copy (read directly from the local
   checkout the supervisor workflow always makes of the default branch - see
   "Architecture: the workflow split" above - not a separate, spoofable
   network round trip) before a `"success"` conclusion is ever reported as
-  such. A same-name/path run whose workflow file does not match - or whose
-  content could not be read on either side - is reported as `"untrusted"`
-  instead of `"success"`, and `supervisor-policy.mjs` treats `"untrusted"`
-  exactly like `"failure"`: it can never reach the merge-ready branch,
-  regardless of the run's own conclusion or of any owner ACCEPTED verdict
-  recorded at that same head.
+  such.
+
+  **DE-0010-R1 cycle 2 (decision-path rooting):** byte-identity of the
+  workflow file alone is still insufficient - that trusted, unmodified YAML
+  checks out and executes whatever the pull request's own head defines for
+  `npm run check:governance`/`typecheck`/`test`, including `package.json`'s
+  own script definitions, `tsconfig.json`/`vitest.config.ts`, the governance
+  validator (`scripts/validate-project-governance.mjs`), and every
+  transitive helper under `scripts/` or `test/`. A same-repository pull
+  request could leave the workflow file byte-identical to `main` and still
+  weaken or neuter any of those, then land a genuinely successful,
+  byte-trusted run at its own exact head. `evaluateGovernanceEvidence`
+  additionally requires that `changedFilePaths` - every file path GitHub's
+  compare API (`base...head`) reports as different between the pull
+  request's own recorded base branch and its exact current head, fetched by
+  the wiring layer, never read from PR-supplied content - contains no file
+  matching `isGovernanceDecisionPathFile` (an exact match against
+  `GOVERNANCE_DECISION_PATH_FILES` - the workflow file, `package.json`,
+  `tsconfig.json`, `vitest.config.ts` - or a prefix match against
+  `GOVERNANCE_DECISION_PATH_DIRECTORIES` - every file under `scripts/` or
+  `test/`, including a file newly added by the pull request itself, since
+  the check is a directory-prefix rule rather than an enumerated list of
+  pre-existing files). This is a deliberately conservative, deterministic
+  reading of issue #29's minimum bar: rather than attempt to judge whether a
+  change to one of these files is malicious, a pull request that touches
+  *any* of them is unconditionally ineligible for a trusted `"success"`
+  conclusion, regardless of the workflow file's own byte-identity or the
+  run's own conclusion.
+
+  A same-name/path run whose workflow file does not match, whose content
+  could not be read on either side, whose decision-path diff could not be
+  read, or which touches any governance decision-path file, is reported as
+  `"untrusted"` instead of `"success"`, and `supervisor-policy.mjs` treats
+  `"untrusted"` exactly like `"failure"`: it can never reach the merge-ready
+  branch, regardless of the run's own conclusion or of any owner ACCEPTED
+  verdict recorded at that same head.
+
+  **Trust boundary.** Ordinary application code under `src/`, documentation,
+  and project state/fixtures are deliberately *not* part of the governance
+  decision path, so an ordinary code change unrelated to
+  governance/typecheck/test enforcement still reaches a trusted `"success"`
+  conclusion when the workflow file is untouched and the run is genuinely
+  green - otherwise no pull request could ever become merge-ready
+  automatically. This means a change to `scripts/` or `test/` content that
+  is itself legitimate (e.g. this remediation cycle's own new regression
+  tests) is *also* reported `"untrusted"`, the same as a malicious change
+  would be - the automated check cannot distinguish the two, by design, and
+  intentionally falls back to requiring a human owner's exact-head review
+  and explicit `ACCEPTED` verdict for any pull request that touches the
+  decision path, rather than attempting a permissive but judgment-based
+  classification it cannot deterministically get right. GitHub's compare API
+  caps the returned file list at 300 changed files per pull request; a pull
+  request larger than that would have any files beyond the cap silently
+  excluded from `changedFilePaths` (`scripts/run-autonomy-supervisor.mjs`
+  documents this bound alongside `fetchChangedFilePaths`).
 - `supervisor-provenance.mjs` - the single fail-closed
   `isUneditedProvenance` check used everywhere a **comment** body is trusted
   as evidence (owner-verdict conversation comments, dispatch markers): both

@@ -159,6 +159,38 @@ async function fetchFileContentAtRef(token, owner, repo, path, ref) {
   }
 }
 
+/**
+ * DE-0010-R1 cycle 2: lists every file path GitHub's compare API reports as
+ * different between the pull request's own recorded base branch (never a
+ * hardcoded branch name, and never read from PR title/body/label content -
+ * `pull.base.ref` is set by GitHub itself when the pull request is opened)
+ * and its exact current head SHA. Fails closed to `null` on any error or
+ * unexpected response shape - never an empty array - so
+ * `evaluateGovernanceEvidence` in supervisor-ci.mjs can never mistake an
+ * unreadable diff for "nothing changed, so trust it". Renamed files
+ * contribute both their old and new path, so a decision-path file renamed
+ * away (or into) the governance decision path is still caught.
+ *
+ * Known bound: GitHub's compare API reports at most the first 300 changed
+ * files. A pull request touching more files than that would have any files
+ * beyond the cap silently excluded from this list; this repository's pull
+ * requests have never approached that size.
+ */
+async function fetchChangedFilePaths(token, owner, repo, base, headSha) {
+  try {
+    const data = await githubRequest(token, `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${headSha}`);
+    if (!Array.isArray(data?.files)) return null;
+    const paths = [];
+    for (const file of data.files) {
+      if (typeof file?.filename === "string") paths.push(file.filename);
+      if (typeof file?.previous_filename === "string") paths.push(file.previous_filename);
+    }
+    return paths;
+  } catch {
+    return null;
+  }
+}
+
 function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
   const repositoryFullName = `${owner}/${repo}`;
 
@@ -173,7 +205,7 @@ function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
       const snapshots = [];
       for (const pull of pulls) {
         const headSha = pull.head.sha;
-        const [workflowRuns, reviews, comments, headGovernanceWorkflowContent] = await Promise.all([
+        const [workflowRuns, reviews, comments, headGovernanceWorkflowContent, changedFilePaths] = await Promise.all([
           githubPaginated(
             token,
             `${GITHUB_API}/repos/${owner}/${repo}/actions/runs?head_sha=${headSha}&per_page=100`,
@@ -190,6 +222,7 @@ function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
             (page) => page,
           ),
           fetchFileContentAtRef(token, owner, repo, GOVERNANCE_WORKFLOW_PATH, headSha),
+          fetchChangedFilePaths(token, owner, repo, pull.base.ref, headSha),
         ]);
         snapshots.push({
           number: pull.number,
@@ -203,6 +236,7 @@ function makeDeps({ token, owner, repo, ownerLogin, agentId, agentToken }) {
               headContent: headGovernanceWorkflowContent,
               defaultBranchContent: defaultBranchGovernanceWorkflowContent,
             },
+            changedFilePaths,
           }),
           ownerVerdictEvents: buildOwnerVerdictEvents({
             ownerLogin,
