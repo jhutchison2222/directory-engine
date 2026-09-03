@@ -24,13 +24,29 @@ import { isUneditedProvenance } from "./supervisor-provenance.mjs";
  *    is not allowed to cross another marker keyword (ACCEPTED/REJECTED/
  *    SUPERSEDED), so incidental prose mentioning remediation ahead of a
  *    real ACCEPTED clause can never steal that clause's head reference.
- * 3. A comment or review is only ever trusted when it carries valid,
+ * 3. A conversation comment is only ever trusted when it carries valid,
  *    matching creation/update provenance (see isUneditedProvenance) - an
  *    edited owner comment (whether edited by the owner or, per GitHub's
  *    collaborator comment-editing model, by another user while the
  *    original author is preserved) is never trusted as evidence, and a
  *    missing/unparseable timestamp fails closed rather than being trusted
  *    by default.
+ *
+ * Follow-up remediation: an earlier version of item 3 also applied to
+ * formal reviews, using `updatedAt: review.submittedAt` as a stand-in
+ * provenance value. That was a manufactured equality, not a real edit
+ * check - GitHub's list-reviews REST response has no field that reflects
+ * whether a review's body was edited after submission, so comparing
+ * `submittedAt` to itself always "passed" and made the check meaningless
+ * for reviews. Rather than manufacture missing provenance, formal reviews
+ * no longer honor explicit body markers at all (see buildOwnerVerdictEvents
+ * below): they are trusted only via their own immutable native GitHub
+ * verdict (APPROVED/CHANGES_REQUESTED), which GitHub itself invalidates by
+ * superseding a review on a new submission or explicit dismissal - not by a
+ * self-reported timestamp this module cannot verify. Owner-authored
+ * conversation comments are unaffected: GitHub's issue-comments API does
+ * expose a real, independent `updated_at`, so their provenance check still
+ * has something genuine to verify.
  */
 
 export const OWNER_VERDICT_KINDS = Object.freeze({
@@ -106,23 +122,28 @@ export function isTrustedOwnerLogin(login, ownerLogin) {
 /**
  * Builds the chronologically-orderable list of owner-authored verdict events
  * for one pull request, merging owner-authored PR conversation comments with
- * owner-authored formal PR reviews. A conversation comment only counts when
- * it carries an explicit marker (see classifyOwnerCommentBody) AND has valid,
- * matching creation/update provenance (see isUneditedProvenance) - an edited
- * comment is never trusted, and a comment missing either timestamp fails
- * closed. A formal review counts either via an explicit marker in its body,
- * or - lacking one - via its own native GitHub verdict (APPROVED ->
- * accepted, CHANGES_REQUESTED -> rejected); DISMISSED and PENDING reviews are
- * excluded up front, before any marker text is even inspected, so a
- * dismissed/pending review's body can never be classified as a verdict
- * either via its native state or an explicit marker. Any other non-actionable
- * native review state (COMMENTED) without an explicit marker is likewise not
- * evidence, so a non-actionable follow-up review can never overwrite an
- * earlier real verdict. GitHub's reviews API does not expose a separate
- * edit-timestamp field the way its comments API does; callers are expected
- * to supply `updatedAt` equal to `submittedAt` for reviews (documented in
- * docs/automation/autonomy-supervisor.md), so the same provenance check
- * still fails closed on a genuinely missing/unparseable timestamp.
+ * owner-authored formal PR reviews.
+ *
+ * A conversation comment only counts when it carries an explicit marker (see
+ * classifyOwnerCommentBody) AND has valid, matching creation/update
+ * provenance (see isUneditedProvenance) - an edited comment is never
+ * trusted, and a comment missing either timestamp fails closed. GitHub's
+ * issue-comments API exposes a genuine, independent `updated_at`, so this
+ * check has real edit evidence to verify.
+ *
+ * A formal review is trusted only via its own immutable native GitHub
+ * verdict - APPROVED -> accepted, CHANGES_REQUESTED -> rejected - never via
+ * an explicit marker in its body. GitHub's list-reviews response has no
+ * field that reflects whether a review body was edited after submission
+ * (unlike comments' `updated_at`), so there is no way to verify a review
+ * body has not been rewritten after the fact; rather than manufacture or
+ * skip that check, explicit body markers are simply never honored for
+ * reviews - only the state GitHub itself records and enforces is trusted.
+ * DISMISSED and PENDING reviews are excluded up front, so a dismissed or
+ * still-pending review's state can never be classified as a verdict. Any
+ * other non-actionable native state (COMMENTED) is likewise not evidence,
+ * so a non-actionable follow-up review can never overwrite an earlier real
+ * verdict.
  */
 export function buildOwnerVerdictEvents({ ownerLogin, comments = [], reviews = [] }) {
   const events = [];
@@ -135,12 +156,6 @@ export function buildOwnerVerdictEvents({ ownerLogin, comments = [], reviews = [
   for (const review of reviews) {
     if (!isTrustedOwnerLogin(review.authorLogin, ownerLogin)) continue;
     if (review.state === "DISMISSED" || review.state === "PENDING") continue;
-    if (!isUneditedProvenance({ createdAt: review.submittedAt, updatedAt: review.updatedAt })) continue;
-    const classified = classifyOwnerCommentBody(review.body);
-    if (classified) {
-      events.push({ ...classified, submittedAt: review.submittedAt });
-      continue;
-    }
     if (review.state === "APPROVED") {
       events.push({ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: review.headSha, submittedAt: review.submittedAt });
     } else if (review.state === "CHANGES_REQUESTED") {

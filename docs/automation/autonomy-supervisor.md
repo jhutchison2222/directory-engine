@@ -109,11 +109,12 @@ reference of any kind appears in the wake workflow.
   immediately (only the schedule/manual paths may proceed without one), then
   repository match, actor (never a Claude-associated actor, and never a
   generic bot actor - preventing recursion against the supervisor's own
-  comments/labels - unless the sender is on an explicit, injectable
-  trusted-bot-login allowlist supplied from the `AUTONOMY_TRUSTED_BOT_LOGINS`
-  repository variable, never issue/PR content; `github-actions[bot]` can
-  never be on that allowlist regardless of configuration), and the event's
-  own action/comment-scope filter. The secret-bearing supervisor's own
+  comments/labels - unless the sender is on the fixed, reviewed
+  `TRUSTED_BOT_LOGINS` code constant in `supervisor-event-guard.mjs`
+  (currently empty; see "Open items" below), never a repository variable or
+  issue/PR content; `github-actions[bot]` can never be on that allowlist
+  regardless of configuration), and the event's own action/comment-scope
+  filter. The secret-bearing supervisor's own
   `workflow_run` handling separately requires the completing run to match
   the wake workflow's fixed name *and* path (`WAKE_WORKFLOW_NAME`/
   `WAKE_WORKFLOW_PATH` in `supervisor-event-guard.mjs`) and have
@@ -197,16 +198,19 @@ under `scripts/lib/`:
   workflow file elsewhere in `.github/workflows/` with an identical
   human-readable `name:`.
 - `supervisor-provenance.mjs` - the single fail-closed
-  `isUneditedProvenance` check used everywhere a comment/review body is
-  trusted as evidence (owner verdicts, dispatch markers): both
+  `isUneditedProvenance` check used everywhere a **comment** body is trusted
+  as evidence (owner-verdict conversation comments, dispatch markers): both
   `createdAt`/`updatedAt` must be present, parseable, and exactly equal, or
   the body is not trusted - a missing timestamp is never treated as "safe by
-  default".
+  default". This check is not used for formal PR review bodies (see "Owner-only
+  exact-head acceptance chronology" below) because GitHub's list-reviews API
+  exposes no genuine independent edit timestamp to check.
 - `supervisor-idempotency.mjs` - deterministic idempotency keys, the hidden
   HTML-comment dispatch marker used as the duplicate-suppression ledger (the
   workflow has no `contents: write`, so it cannot persist a ledger file; it
   reads its own prior marker comments instead), trusted-marker-author
-  filtering, and the same edited-comment provenance check as owner verdicts.
+  filtering, and the same edited-comment provenance check as owner-verdict
+  comments.
 - `supervisor-event-guard.mjs` - the pure gate, shared by both workflows'
   entry scripts, deciding whether one event-driven invocation should proceed,
   including the missing/unreadable-payload fail-closed check and (for the
@@ -246,24 +250,34 @@ never guessed, hardcoded, or read from issue/PR content.
 
 `supervisor-verdicts.mjs` merges owner-authored pull-request conversation
 comments with owner-authored formal PR reviews into a single chronological
-verdict timeline (`buildOwnerVerdictEvents`). A conversation comment only
-counts when it carries an explicit marker: `ACCEPTED — exact head <sha>`,
-`REJECTED — exact head <sha>`, `SUPERSEDED ... exact head <sha>`, or a
-remediation request tied to an exact head (recognizing the owner's own
-real-world phrasing, e.g. "Remediate DE-0010 at exact head `<sha>`") -
-`NOT ACCEPTED`/`UNACCEPTED` phrasing never matches the ACCEPTED marker, and a
-remediation-flavored word appearing ahead of a real `ACCEPTED` clause can
-never consume that clause's own head reference (the marker's bounded
-lookahead cannot cross another marker keyword). A formal review is first
-excluded entirely if its native state is `DISMISSED` or `PENDING` - even if
-its body carries what looks like an explicit marker - and otherwise counts
-via an explicit marker in its body, or - lacking one - via its own native
-GitHub verdict (`APPROVED` -> accepted, `CHANGES_REQUESTED` -> rejected);
-`COMMENTED` without an explicit marker is not evidence. Every comment/review
-considered here must also pass `isUneditedProvenance` - an edited comment
-(GitHub preserves the original author on an edit, so author identity alone
-is not proof the body is still what the owner wrote) is never trusted,
-regardless of the identity that appears to have authored it.
+verdict timeline (`buildOwnerVerdictEvents`), but trusts the two kinds of
+evidence differently:
+
+- A **conversation comment** only counts when it carries an explicit marker:
+  `ACCEPTED — exact head <sha>`, `REJECTED — exact head <sha>`,
+  `SUPERSEDED ... exact head <sha>`, or a remediation request tied to an
+  exact head (recognizing the owner's own real-world phrasing, e.g.
+  "Remediate DE-0010 at exact head `<sha>`") - `NOT ACCEPTED`/`UNACCEPTED`
+  phrasing never matches the ACCEPTED marker, and a remediation-flavored word
+  appearing ahead of a real `ACCEPTED` clause can never consume that clause's
+  own head reference (the marker's bounded lookahead cannot cross another
+  marker keyword). It must also pass `isUneditedProvenance` - an edited
+  comment (GitHub preserves the original author on an edit, so author
+  identity alone is not proof the body is still what the owner wrote) is
+  never trusted, regardless of the identity that appears to have authored it.
+- A **formal PR review** is first excluded entirely if its native state is
+  `DISMISSED` or `PENDING`, and otherwise counts *only* via its own
+  immutable native GitHub verdict (`APPROVED` -> accepted,
+  `CHANGES_REQUESTED` -> rejected); `COMMENTED` is not evidence. An explicit
+  marker in a review's *body* is never honored, even for an otherwise
+  actionable state - GitHub's list-reviews API exposes no genuine,
+  independent edit timestamp the way its comments API does, so there is no
+  way to verify a review body has not been rewritten after submission. An
+  earlier version manufactured `updatedAt = submittedAt` for reviews to run
+  the same provenance check comments use, which made the check pass
+  unconditionally rather than verify anything; rather than manufacture or
+  skip that check, review bodies are simply never trusted as verdict
+  evidence at all.
 
 `selectLatestOwnerVerdict` picks the chronologically latest event (by
 timestamp) among those recorded at the pull request's exact current head.
@@ -471,18 +485,18 @@ partial or inconsistent state left behind.
   the harmless in-memory proof below as evidence of a real `202 Accepted`
   response or of fresh live-agent behavior; that requires the separate,
   explicitly authorized post-merge live verification step described above.
-- **The trusted-bot-login allowlist is wired but unconfigured by default.**
-  Both workflows now export the optional `AUTONOMY_TRUSTED_BOT_LOGINS`
-  repository variable into the environment their scripts read
-  (`vars.AUTONOMY_TRUSTED_BOT_LOGINS`), so a specifically trusted
-  reviewer/agent identity (e.g. a GitHub App-backed Workspace Agent, which
-  posts as sender type `Bot`) can trigger the event-driven fast path without
-  weakening the generic bot-recursion guard, once an owner independently
-  confirms the Workspace Agent's literal GitHub login and sets that
-  variable. Until then, the variable remains unset, no bot identity beyond
-  the hardcoded `github-actions[bot]` exclusion is trusted, and the
-  event-driven path falls back to the five-minute schedule for that
-  evidence, exactly as before this change.
+- **The trusted-bot-login allowlist is a fixed, empty code constant.**
+  `TRUSTED_BOT_LOGINS` in `supervisor-event-guard.mjs` is a literal, frozen
+  module constant - not a repository variable or any other mutable setting -
+  because the owner requires this trust boundary to be changeable only
+  through code review. It is empty because no non-owner bot identity (e.g.
+  the ChatGPT Workspace Agent's literal GitHub login, which would post as
+  sender type `Bot`) has yet been independently confirmed by repository
+  evidence. Until a confirmed literal login is added here through its own
+  separately reviewed change, every bot-type sender - including a
+  legitimate trusted reviewer/agent - is rejected by the event-driven fast
+  path, and that evidence is instead picked up by the five-minute schedule,
+  exactly as it was before the fast path existed.
 - **Bootstrap:** neither workflow can successfully invoke its script against
   `main` until this pull request merges (neither script, nor
   `autonomy-wake.yml` itself, exists on `main` yet). A pre-merge failure of

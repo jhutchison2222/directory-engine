@@ -26,18 +26,3 @@ export function readGithubEvent(env = process.env) {
   }
   return { eventName, payload, payloadAvailable };
 }
-
-/** Parses the fixed, reviewed, non-secret environment variable naming any
- * GitHub bot identity trusted to bypass the generic bot-actor recursion
- * guard (see NEVER_TRUSTED_BOT_LOGINS in supervisor-event-guard.mjs, which
- * still always rejects github-actions[bot] regardless of this value). This
- * is read from the process environment only - never from issue/PR content,
- * a label, or any other repository-controlled text - and is optional: if
- * unset, no bot identity beyond the hardcoded exclusions is trusted. */
-export function parseTrustedBotLogins(rawValue) {
-  if (typeof rawValue !== "string") return [];
-  return rawValue
-    .split(",")
-    .map((login) => login.trim())
-    .filter((login) => login.length > 0);
-}

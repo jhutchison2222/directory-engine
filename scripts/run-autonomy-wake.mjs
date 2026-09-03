@@ -1,4 +1,4 @@
-import { readGithubEvent, parseTrustedBotLogins } from "./lib/read-github-event.mjs";
+import { readGithubEvent } from "./lib/read-github-event.mjs";
 import { shouldHandleEvent } from "./lib/supervisor-event-guard.mjs";
 
 /**
@@ -37,7 +37,6 @@ function main() {
     senderType: payload?.sender?.type,
     isPullRequestComment: Boolean(payload?.issue?.pull_request),
     labels: (payload?.issue?.labels ?? []).map((label) => (typeof label === "string" ? label : label.name)),
-    trustedBotLogins: parseTrustedBotLogins(process.env.AUTONOMY_TRUSTED_BOT_LOGINS),
   });
 
   console.log(`autonomy wake: ${decision.handle ? "waking the supervisor" : "skipping"} (${decision.reason})`);

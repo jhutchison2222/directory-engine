@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { WAKE_WORKFLOW_NAME, WAKE_WORKFLOW_PATH, shouldHandleEvent } from "../scripts/lib/supervisor-event-guard.mjs";
+import {
+  TRUSTED_BOT_LOGINS,
+  WAKE_WORKFLOW_NAME,
+  WAKE_WORKFLOW_PATH,
+  isExplicitlyTrustedBotLogin,
+  shouldHandleEvent,
+} from "../scripts/lib/supervisor-event-guard.mjs";
 import { AUTONOMY_READY_LABEL } from "../scripts/lib/supervisor-policy.mjs";
 
 const REPO = "jhutchison2222/directory-engine";
@@ -122,8 +128,34 @@ describe("shouldHandleEvent: self/bot recursion prevention", () => {
   });
 });
 
-describe("shouldHandleEvent: explicit trusted-bot-login allowance (DE-0010 item 2)", () => {
-  it("handles a review submitted by a specifically trusted bot-type reviewer/agent identity", () => {
+describe("isExplicitlyTrustedBotLogin: pure matching predicate (DE-0010 item 2 mechanism)", () => {
+  it("matches a login present on a supplied allowlist, case-insensitively", () => {
+    expect(
+      isExplicitlyTrustedBotLogin("Directory-Engine-Workspace-Agent[bot]", ["directory-engine-workspace-agent[bot]"]),
+    ).toBe(true);
+  });
+
+  it("does not match a login absent from a supplied allowlist", () => {
+    expect(isExplicitlyTrustedBotLogin("dependabot[bot]", ["directory-engine-workspace-agent[bot]"])).toBe(false);
+  });
+
+  it("never matches github-actions[bot], even if a caller-supplied list includes it", () => {
+    expect(isExplicitlyTrustedBotLogin("github-actions[bot]", ["github-actions[bot]"])).toBe(false);
+  });
+
+  it("fails closed on a missing or empty sender login", () => {
+    expect(isExplicitlyTrustedBotLogin(undefined, ["some-login"])).toBe(false);
+    expect(isExplicitlyTrustedBotLogin("", ["some-login"])).toBe(false);
+  });
+});
+
+describe("shouldHandleEvent: fixed trusted-bot allowlist, not a repository-variable trust anchor (DE-0010 remediation)", () => {
+  it("TRUSTED_BOT_LOGINS is a frozen, empty code constant - no non-owner bot identity has been confirmed yet", () => {
+    expect(Object.isFrozen(TRUSTED_BOT_LOGINS)).toBe(true);
+    expect(TRUSTED_BOT_LOGINS).toEqual([]);
+  });
+
+  it("shouldHandleEvent accepts no trustedBotLogins option; an injected override has no effect", () => {
     const decision = shouldHandleEvent({
       eventName: "pull_request_review",
       action: "submitted",
@@ -131,61 +163,22 @@ describe("shouldHandleEvent: explicit trusted-bot-login allowance (DE-0010 item 
       expectedRepositoryFullName: REPO,
       senderLogin: "directory-engine-workspace-agent[bot]",
       senderType: "Bot",
-      trustedBotLogins: ["directory-engine-workspace-agent[bot]"],
-    });
-    expect(decision).toEqual({ handle: true, reason: "pull_request_review_event" });
-  });
-
-  it("handles a comment on a pull request from a trusted bot login, matched case-insensitively", () => {
-    const decision = shouldHandleEvent({
-      eventName: "issue_comment",
-      action: "created",
-      repositoryFullName: REPO,
-      expectedRepositoryFullName: REPO,
-      senderLogin: "Directory-Engine-Workspace-Agent[bot]",
-      senderType: "Bot",
-      isPullRequestComment: true,
-      trustedBotLogins: ["directory-engine-workspace-agent[bot]"],
-    });
-    expect(decision).toEqual({ handle: true, reason: "issue_comment_event" });
-  });
-
-  it("still rejects github-actions[bot] even if a misconfigured trustedBotLogins list includes it", () => {
-    const decision = shouldHandleEvent({
-      eventName: "issue_comment",
-      action: "created",
-      repositoryFullName: REPO,
-      expectedRepositoryFullName: REPO,
-      senderLogin: "github-actions[bot]",
-      senderType: "Bot",
-      isPullRequestComment: true,
-      trustedBotLogins: ["github-actions[bot]"],
-    });
-    expect(decision).toEqual({ handle: false, reason: "bot_actor" });
-  });
-
-  it("still rejects an unrelated bot not on the trusted allowlist", () => {
-    const decision = shouldHandleEvent({
-      eventName: "issue_comment",
-      action: "created",
-      repositoryFullName: REPO,
-      expectedRepositoryFullName: REPO,
-      senderLogin: "dependabot[bot]",
-      senderType: "Bot",
-      isPullRequestComment: true,
+      // Even if a caller tries to pass this, it must be silently ignored -
+      // the trust boundary is compiled into the module, not runtime input.
       trustedBotLogins: ["directory-engine-workspace-agent[bot]"],
     });
     expect(decision).toEqual({ handle: false, reason: "bot_actor" });
   });
 
-  it("defaults to rejecting every bot actor when no trustedBotLogins is supplied (unchanged default behavior)", () => {
+  it("rejects every bot-type sender today, since the fixed allowlist is empty until a literal login is confirmed and reviewed", () => {
     const decision = shouldHandleEvent({
-      eventName: "pull_request_review",
-      action: "submitted",
+      eventName: "issue_comment",
+      action: "created",
       repositoryFullName: REPO,
       expectedRepositoryFullName: REPO,
       senderLogin: "directory-engine-workspace-agent[bot]",
       senderType: "Bot",
+      isPullRequestComment: true,
     });
     expect(decision).toEqual({ handle: false, reason: "bot_actor" });
   });

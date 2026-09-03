@@ -121,41 +121,37 @@ describe("buildOwnerVerdictEvents", () => {
     expect(events).toEqual([]);
   });
 
-  it("classifies an owner formal review's native APPROVED/CHANGES_REQUESTED state when no explicit marker is present", () => {
+  it("classifies an owner formal review's native APPROVED/CHANGES_REQUESTED state", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       reviews: [
         {
           authorLogin: OWNER,
-          body: "",
           state: "APPROVED",
           headSha: HEAD_A,
           submittedAt: "2026-09-02T09:00:00Z",
-          updatedAt: "2026-09-02T09:00:00Z",
         },
       ],
     });
     expect(events).toEqual([{ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: HEAD_A, submittedAt: "2026-09-02T09:00:00Z" }]);
   });
 
-  it("ignores a non-independent owner formal review state (COMMENTED) with no explicit marker", () => {
+  it("ignores a non-actionable owner formal review state (COMMENTED)", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       reviews: [
         {
           authorLogin: OWNER,
-          body: "just a comment",
           state: "COMMENTED",
           headSha: HEAD_A,
           submittedAt: "2026-09-02T09:00:00Z",
-          updatedAt: "2026-09-02T09:00:00Z",
         },
       ],
     });
     expect(events).toEqual([]);
   });
 
-  it("ignores a DISMISSED review's explicit marker text, not only its native state", () => {
+  it("ignores a DISMISSED review entirely, regardless of its body", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       reviews: [
@@ -165,14 +161,13 @@ describe("buildOwnerVerdictEvents", () => {
           state: "DISMISSED",
           headSha: HEAD_A,
           submittedAt: "2026-09-02T09:00:00Z",
-          updatedAt: "2026-09-02T09:00:00Z",
         },
       ],
     });
     expect(events).toEqual([]);
   });
 
-  it("ignores a PENDING review's explicit marker text, not only its native state", () => {
+  it("ignores a PENDING review entirely, regardless of its body", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       reviews: [
@@ -182,14 +177,13 @@ describe("buildOwnerVerdictEvents", () => {
           state: "PENDING",
           headSha: HEAD_A,
           submittedAt: "2026-09-02T09:00:00Z",
-          updatedAt: "2026-09-02T09:00:00Z",
         },
       ],
     });
     expect(events).toEqual([]);
   });
 
-  it("prefers an explicit marker in a review body over its native state", () => {
+  it("remediation regression: never honors an explicit marker in a formal review's body - only its immutable native state is trusted, since GitHub exposes no real edit-provenance field for reviews", () => {
     const events = buildOwnerVerdictEvents({
       ownerLogin: OWNER,
       reviews: [
@@ -199,9 +193,33 @@ describe("buildOwnerVerdictEvents", () => {
           state: "APPROVED",
           headSha: HEAD_A,
           submittedAt: "2026-09-02T09:00:00Z",
-          updatedAt: "2026-09-02T09:00:00Z",
         },
       ],
+    });
+    // The native APPROVED state wins, not the (unverifiable) body text.
+    expect(events).toEqual([{ kind: OWNER_VERDICT_KINDS.ACCEPTED, headSha: HEAD_A, submittedAt: "2026-09-02T09:00:00Z" }]);
+  });
+
+  it("remediation regression: an explicit ACCEPTED marker in a non-actionable (COMMENTED) review body is never trusted as an event", () => {
+    const events = buildOwnerVerdictEvents({
+      ownerLogin: OWNER,
+      reviews: [
+        {
+          authorLogin: OWNER,
+          body: `ACCEPTED — exact head ${HEAD_A}`,
+          state: "COMMENTED",
+          headSha: HEAD_A,
+          submittedAt: "2026-09-02T09:00:00Z",
+        },
+      ],
+    });
+    expect(events).toEqual([]);
+  });
+
+  it("remediation regression: trusts a formal review's native state even with no body/updatedAt supplied at all - no provenance value is manufactured or required for reviews", () => {
+    const events = buildOwnerVerdictEvents({
+      ownerLogin: OWNER,
+      reviews: [{ authorLogin: OWNER, state: "CHANGES_REQUESTED", headSha: HEAD_A, submittedAt: "2026-09-02T09:00:00Z" }],
     });
     expect(events).toEqual([{ kind: OWNER_VERDICT_KINDS.REJECTED, headSha: HEAD_A, submittedAt: "2026-09-02T09:00:00Z" }]);
   });
@@ -212,11 +230,9 @@ describe("buildOwnerVerdictEvents", () => {
       reviews: [
         {
           authorLogin: "codex",
-          body: "",
           state: "APPROVED",
           headSha: HEAD_A,
           submittedAt: "2026-09-02T09:00:00Z",
-          updatedAt: "2026-09-02T09:00:00Z",
         },
       ],
     });

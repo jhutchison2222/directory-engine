@@ -38,9 +38,10 @@ describe("autonomy-wake.yml: no credential can ever enter this PR-controlled-tri
     expect(workflow).not.toMatch(/secrets\./);
   });
 
-  it("references at most the one non-secret trusted-bot-login repository variable", () => {
+  it("references no repository variable at all; the trusted-bot-login allowlist is a fixed code constant, not a mutable setting", () => {
+    expect(workflow).not.toMatch(/AUTONOMY_TRUSTED_BOT_LOGINS/);
     const varRefs = [...workflow.matchAll(/vars\.([A-Za-z0-9_]+)/g)].map((match) => match[1]);
-    expect(new Set(varRefs)).toEqual(new Set(["AUTONOMY_TRUSTED_BOT_LOGINS"]));
+    expect(varRefs).toEqual([]);
   });
 });
 

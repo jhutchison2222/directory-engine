@@ -1,4 +1,4 @@
-import { readGithubEvent, parseTrustedBotLogins } from "./lib/read-github-event.mjs";
+import { readGithubEvent } from "./lib/read-github-event.mjs";
 import { runAutonomySupervisor } from "./lib/supervisor-run.mjs";
 import { summarizeGovernanceWorkflowRuns } from "./lib/supervisor-ci.mjs";
 import { buildOwnerVerdictEvents } from "./lib/supervisor-verdicts.mjs";
@@ -98,17 +98,16 @@ function normalizeWorkflowRun(run) {
 function buildReviewsForVerdicts(reviews) {
   return reviews.map((review) => ({
     authorLogin: review.user?.login,
-    body: review.body,
     state: review.state,
     headSha: review.commit_id,
     submittedAt: review.submitted_at,
-    // GitHub's "list reviews" response has no separate edit-timestamp field
-    // the way its comments API does (see buildCommentsForVerdicts below),
-    // so there is no distinct value to detect an edit against. `updatedAt`
-    // is set equal to `submittedAt` so isUneditedProvenance's equality
-    // check still runs (and still fails closed on a missing/unparseable
-    // value) rather than being silently skipped for reviews.
-    updatedAt: review.submitted_at,
+    // Deliberately no `body`/`updatedAt` fields: GitHub's "list reviews"
+    // response has no field reflecting whether a review's body was edited
+    // after submission (unlike comments' `updated_at`), so there is no
+    // genuine provenance to check here. buildOwnerVerdictEvents in
+    // supervisor-verdicts.mjs no longer reads a review's body as verdict
+    // evidence at all - only its immutable native `state` - so no
+    // manufactured provenance value is needed or supplied.
   }));
 }
 
@@ -278,7 +277,6 @@ function decideWhetherToHandleThisEvent() {
     workflowName: payload?.workflow_run?.name,
     workflowPath: payload?.workflow_run?.path,
     workflowRunConclusion: payload?.workflow_run?.conclusion,
-    trustedBotLogins: parseTrustedBotLogins(process.env.AUTONOMY_TRUSTED_BOT_LOGINS),
   });
 }
 

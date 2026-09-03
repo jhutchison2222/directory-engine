@@ -121,8 +121,13 @@ describe("autonomy-supervisor.yml: credentials referenced by name only", () => {
     expect(workflow).toContain("${{ secrets.CHATGPT_WORKSPACE_AGENT_TOKEN }}");
   });
 
-  it("security redesign item 6: exports the trusted-bot-login allowlist repository variable into the runtime", () => {
-    expect(workflow).toContain("${{ vars.AUTONOMY_TRUSTED_BOT_LOGINS }}");
+  it("never sources the trusted-bot-login allowlist from a repository variable; that trust anchor is fixed in reviewed code, not a mutable setting", () => {
+    expect(workflow).not.toMatch(/AUTONOMY_TRUSTED_BOT_LOGINS/);
+  });
+
+  it("references no repository variable other than the Workspace Agent id", () => {
+    const varRefs = [...workflow.matchAll(/vars\.([A-Za-z0-9_]+)/g)].map((match) => match[1]);
+    expect(new Set(varRefs)).toEqual(new Set(["CHATGPT_WORKSPACE_AGENT_ID"]));
   });
 
   it("never references a repository/environment secret other than the one authorized Workspace Agent token", () => {

@@ -54,14 +54,47 @@ export const WAKE_WORKFLOW_PATH = ".github/workflows/autonomy-wake.yml";
 const SELF_OR_RECURSIVE_ACTOR_PATTERN = /claude|autonomy-supervisor/i;
 
 /** GitHub identities that must never bypass the bot-actor recursion guard,
- * regardless of any injected trusted-identity configuration. This is a
- * hardcoded exclusion (never overridable via `trustedBotLogins`) so that a
- * misconfigured or overly broad trusted-login list could never re-enable
- * recursion against the supervisor's own `GITHUB_TOKEN`-authored dispatch
- * markers and label changes. */
+ * regardless of TRUSTED_BOT_LOGINS below. This is a hardcoded exclusion so
+ * that a mistaken future addition to TRUSTED_BOT_LOGINS could never
+ * re-enable recursion against the supervisor's own `GITHUB_TOKEN`-authored
+ * dispatch markers and label changes. */
 const NEVER_TRUSTED_BOT_LOGINS = new Set(["github-actions[bot]"]);
 
-function isExplicitlyTrustedBotLogin(senderLogin, trustedBotLogins) {
+/**
+ * Fixed, reviewed allowlist of GitHub bot logins trusted to bypass the
+ * generic bot-actor recursion guard.
+ *
+ * Security redesign follow-up: a prior version sourced this from the
+ * `AUTONOMY_TRUSTED_BOT_LOGINS` repository variable (`vars.*`), which the
+ * owner rejected as a trust anchor - a repository variable is a mutable
+ * setting that can change outside code review, not "a fixed allowlist
+ * committed in reviewed code". This is now a literal, frozen module
+ * constant: the only way to change it is a separately reviewed code
+ * change, exactly like `NEVER_TRUSTED_BOT_LOGINS` above and
+ * `WAKE_WORKFLOW_NAME`/`WAKE_WORKFLOW_PATH`. It is empty because no
+ * non-owner bot identity (e.g. the ChatGPT Workspace Agent's literal
+ * GitHub login) has yet been independently confirmed by repository
+ * evidence; guessing one would risk trusting the wrong actor. Until a
+ * confirmed literal login is added here through its own reviewed change,
+ * every bot-type sender is rejected by the event-driven fast path
+ * (including a legitimate trusted reviewer/agent posting as a bot-type
+ * account) and picked up instead by the five-minute schedule/recovery
+ * backstop, which reads decision evidence directly and does not depend on
+ * this allowlist at all.
+ */
+export const TRUSTED_BOT_LOGINS = Object.freeze([]);
+
+/**
+ * Pure matching predicate, exported separately from TRUSTED_BOT_LOGINS so
+ * its case-insensitivity and NEVER_TRUSTED_BOT_LOGINS-always-wins behavior
+ * can be unit tested directly against a synthetic list, independent of
+ * whatever the real fixed allowlist currently contains. `shouldHandleEvent`
+ * below always calls this with the fixed TRUSTED_BOT_LOGINS constant - it
+ * never accepts an externally supplied list, so there is no way for a
+ * caller (environment variable, event payload, or otherwise) to widen the
+ * trust boundary at runtime.
+ */
+export function isExplicitlyTrustedBotLogin(senderLogin, trustedBotLogins) {
   if (typeof senderLogin !== "string" || senderLogin.length === 0) return false;
   const normalized = senderLogin.toLowerCase();
   if (NEVER_TRUSTED_BOT_LOGINS.has(normalized)) return false;
@@ -79,13 +112,11 @@ function isExplicitlyTrustedBotLogin(senderLogin, trustedBotLogins) {
  * bot-type integration accounts post as sender type `Bot` too, so the fast
  * event-driven path never fired for exactly the kind of evidence
  * (independent review/handoff) it exists to react to quickly; only the
- * five-minute schedule ever picked it up. `trustedBotLogins` is an
- * explicit, injectable allowlist the caller supplies from a fixed reviewed
- * configuration or verified environment (e.g. an environment variable set
- * by the workflow) - never from issue/PR content - and defaults to empty,
- * so behavior is unchanged (every bot actor is still rejected) until a
- * caller explicitly configures one. `NEVER_TRUSTED_BOT_LOGINS` always wins
- * over this allowlist.
+ * five-minute schedule ever picked it up. The fixed, reviewed
+ * TRUSTED_BOT_LOGINS constant above (currently empty) is the only source of
+ * exemption; there is no caller-supplied override, so behavior can only
+ * change via a reviewed code change, never a runtime configuration value.
+ * `NEVER_TRUSTED_BOT_LOGINS` always wins over it.
  */
 export function shouldHandleEvent({
   eventName,
@@ -100,7 +131,6 @@ export function shouldHandleEvent({
   workflowName,
   workflowPath,
   workflowRunConclusion,
-  trustedBotLogins = [],
 } = {}) {
   if (eventName === "schedule" || eventName === "workflow_dispatch") {
     return { handle: true, reason: eventName };
@@ -126,12 +156,12 @@ export function shouldHandleEvent({
   // to it; every other event type ignores bot-authored activity to prevent
   // recursion against the supervisor's own GITHUB_TOKEN-authored comments and
   // labels, and against unrelated bot noise (e.g. dependabot) - unless the
-  // sender is on the caller-supplied trusted-bot allowlist (never
+  // sender is on the fixed TRUSTED_BOT_LOGINS allowlist above (never
   // github-actions[bot], see NEVER_TRUSTED_BOT_LOGINS).
   if (
     eventName !== "workflow_run" &&
     senderType === "Bot" &&
-    !isExplicitlyTrustedBotLogin(senderLogin, trustedBotLogins)
+    !isExplicitlyTrustedBotLogin(senderLogin, TRUSTED_BOT_LOGINS)
   ) {
     return { handle: false, reason: "bot_actor" };
   }
